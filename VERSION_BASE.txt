@@ -1,0 +1,23 @@
+VERSIÓN BASE DEL PROYECTO
+
+Proyecto: Registro de Laptops
+Estado: Funcional y estable
+
+Descripción:
+Esta carpeta contiene el código original del sistema de Registro de Laptops
+en su primer estado completamente funcional.
+
+Características confirmadas:
+- El sistema abre correctamente.
+- Registra entradas y salidas.
+- Guarda la información en Google Sheets.
+- Fecha y hora correctas (zona horaria local).
+- Ejecuta sin errores con Python 3.11.9.
+- Librerías documentadas en requirements.txt.
+
+Regla:
+A partir de este punto, cualquier modificación deberá hacerse de manera
+controlada y documentada, sin alterar este estado base.
+
+Fecha de referencia:
+(Se conserva la fecha en que se estableció esta versión base)

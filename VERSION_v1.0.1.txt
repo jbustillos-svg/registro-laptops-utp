@@ -1,0 +1,14 @@
+VERSIÓN v1.0.1 – ESTABLE
+
+Proyecto: Registro de Laptops
+
+Cambios incluidos:
+- Se agregó identificación visual de la versión en pantalla.
+- Se ajustó el footer para mostrar correctamente la versión.
+- No se realizaron cambios funcionales al sistema.
+
+Estado:
+Versión estable y funcional.
+
+Notas:
+Esta versión se toma como referencia para futuras mejoras.
