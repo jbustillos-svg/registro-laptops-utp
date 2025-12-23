@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.3"
+VERSION_SISTEMA = "v1.0.4"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -215,6 +215,42 @@ def incrementar_no_entregas(matricula):
     except Exception as e:
         print(f"Error al incrementar no entregas: {e}")
         return 0, "ACTIVO"
+    
+def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
+    """
+    Cierra la sesión activa anterior del alumno,
+    registra NO ENTREGA y deja evidencia en Registros.
+    """
+    try:
+        if hoja_registros is None or hoja_alumnos is None:
+            return False
+
+        registros = hoja_registros.get_all_values()
+        hora_actual, _ = obtener_hora_internet()
+
+        for i in reversed(range(len(registros))):
+            fila = registros[i]
+
+            if fila[0] == matricula:
+                hora_salida = fila[4].strip()
+                observacion = fila[7].strip() if len(fila) > 7 else ""
+
+                if hora_salida == "":
+                    # 1️⃣ Registrar salida automática
+                    hoja_registros.update_cell(i + 1, 5, hora_actual)
+                    hoja_registros.update_cell(i + 1, 8, "CIERRE_AUTOMATICO_POR_NUEVA_SESION")
+
+                    # 2️⃣ Contar NO ENTREGA
+                    incrementar_no_entregas(matricula)
+
+                    return True
+                break
+
+    except Exception as e:
+        print(f"Error al cerrar sesión anterior: {e}")
+
+    return False
+
 
 def obtener_control_alumno(matricula):
     """
@@ -823,20 +859,36 @@ def mostrar_confirmacion_simple(nombre, matricula):
         entrada.delete(0, tk.END)
         entrada.focus()
         return
+# 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
+sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
 
-    # 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
-    sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
+if sesion_activa:
+    respuesta = messagebox.askyesno(
+        "Sesión activa detectada",
+        "Se detectó una sesión activa en otro equipo.\n\n"
+        f"Laptop anterior: {laptop_otro}\n\n"
+        "Si continúas:\n"
+        "• La sesión anterior se cerrará automáticamente\n"
+        "• Se registrará como NO ENTREGA\n"
+        "• Esta acción quedará registrada\n\n"
+        "¿Deseas continuar en este equipo?"
+    )
 
-    if sesion_activa:
-        messagebox.showerror(
-            "Sesión activa detectada",
-            f"Esta matrícula ya tiene una sesión activa en otra laptop.\n\n"
-            f"Laptop registrada: {laptop_otro}\n\n"
-            "Debes entregar primero el equipo anterior."
-        )
+    if not respuesta:
         reiniciar_estado_sistema()
         entrada.delete(0, tk.END)
         entrada.focus()
+        return
+
+    # 🔥 Cerrar sesión anterior y contar NO ENTREGA
+    exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
+
+    if not exito:
+        messagebox.showerror(
+            "Error",
+            "No se pudo cerrar la sesión anterior.\n\nIntenta nuevamente."
+        )
+        reiniciar_estado_sistema()
         return
 
 
