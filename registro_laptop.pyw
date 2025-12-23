@@ -854,8 +854,12 @@ def mostrar_aviso_entrega_pendiente(fecha_entrada, laptop_id):
     messagebox.showwarning("Entrega Pendiente", mensaje)
 
 def mostrar_confirmacion_simple(nombre, matricula):
-    global entrada
-    global ventana
+    global entrada, ventana, procesando_sesion
+
+    # 🔓 LIBERAR ESTADO SIEMPRE AL ENTRAR AQUÍ
+    procesando_sesion = False
+    btn_entrar.config(state="normal")
+
 
     # 1. Confirmar identidad
     respuesta = messagebox.askyesno(
@@ -1111,6 +1115,9 @@ def iniciar_sesion():
 
     if procesando_sesion:
         return
+
+    btn_entrar.config(state="normal")
+    procesando_sesion = False
 
     # 🔐 Validar términos y condiciones
     if not terminos_var.get():
