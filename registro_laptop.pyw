@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.2"
+VERSION_SISTEMA = "v1.0.3"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -27,27 +27,37 @@ verificar_conexion_activo = True
 mensaje_espera = None
 procesando_sesion = False
 aviso_internet = None
+terminos_var = None
+
 
 # =========================
-# 🎨 ESTILOS GENERALES (UI)
+# 🎨 PALETA DE COLORES MODERNA
 # =========================
+COLOR_PRIMARIO = "#0066cc"          # Azul principal
+COLOR_SECUNDARIO = "#00a8ff"       # Azul claro
+COLOR_FONDO = "#f5f7fa"            # Gris muy claro
+COLOR_TARJETA = "#ffffff"          # Blanco
+COLOR_TEXTO = "#2d3436"            # Gris oscuro
+COLOR_TEXTO_SECUNDARIO = "#636e72" # Gris medio
+COLOR_EXITO = "#00b894"            # Verde
+COLOR_ERROR = "#e84118"            # Rojo
+COLOR_ADVERTENCIA = "#fdcb6e"      # Amarillo
+COLOR_BORDE = "#dfe6e9"           # Borde gris claro
+COLOR_HOVER = "#f1f2f6"           # Hover gris muy claro
 
-COLOR_FONDO_APP = "#0f3554"       # Azul institucional
-COLOR_TARJETA = "#ffffff"
-COLOR_TEXTO = "#2c3e50"
-COLOR_SECUNDARIO = "#7f8c8d"
-COLOR_PRIMARIO = "#1abc9c"
-COLOR_PELIGRO = "#e74c3c"
-COLOR_LINEA = "#3498db"
-
-FUENTE_TITULO = ("Segoe UI", 18, "bold")
-FUENTE_SUBTITULO = ("Segoe UI", 13, "bold")
-FUENTE_TEXTO = ("Segoe UI", 11)
+# =========================
+# FUENTES MODERNAS
+# =========================
+FUENTE_TITULO = ("Segoe UI", 24, "bold")
+FUENTE_SUBTITULO = ("Segoe UI", 14, "bold")
+FUENTE_CUERPO = ("Segoe UI", 11)
+FUENTE_CUERPO_BOLD = ("Segoe UI", 11, "bold")
+FUENTE_ENTRADA = ("Segoe UI", 14)
 FUENTE_BOTON = ("Segoe UI", 12, "bold")
-FUENTE_PIE = ("Segoe UI", 8)
+FUENTE_PEQ = ("Segoe UI", 9)
+FUENTE_PEQ_BOLD = ("Segoe UI", 9, "bold")
 
-
-# --- FUNCIONES BASE ---
+# --- FUNCIONES BASE (SIN CAMBIOS) ---
 def contar_usos_alumno(matricula):
     """
     Cuenta cuántas veces el alumno ha usado el sistema
@@ -77,13 +87,16 @@ def mostrar_ventana_control_unificada(
     ventana_ctrl.title("Aviso importante")
     ventana_ctrl.resizable(False, False)
     ventana_ctrl.configure(bg="#ffffff")
-
+    
+    # Aplicar estilo moderno
+    ventana_ctrl.configure(bg=COLOR_FONDO)
+    
     # Hacerla modal respecto a la ventana principal
     ventana_ctrl.transient(ventana)
     ventana_ctrl.grab_set()
 
-    ancho = 480
-    alto = 420
+    ancho = 500
+    alto = 450
 
     pantalla_ancho = ventana_ctrl.winfo_screenwidth()
     pantalla_alto = ventana_ctrl.winfo_screenheight()
@@ -92,13 +105,14 @@ def mostrar_ventana_control_unificada(
 
     ventana_ctrl.geometry(f"{ancho}x{alto}+{x}+{y}")
 
-    frame = tk.Frame(ventana_ctrl, bg="#ffffff", padx=25, pady=20)
+    frame = tk.Frame(ventana_ctrl, bg=COLOR_TARJETA, padx=30, pady=25)
     frame.pack(fill=tk.BOTH, expand=True)
 
     # 🔴 USUARIO SANCIONADO
     if estado == "SANCIONADO":
         titulo = "🚫 USUARIO SANCIONADO"
-        color = "#c0392b"
+        color = COLOR_ERROR
+        icono = "🚫"
         mensaje = (
             f"No entregas registradas: {no_entregas} de 4\n\n"
             "Has excedido el número permitido.\n\n"
@@ -107,7 +121,8 @@ def mostrar_ventana_control_unificada(
     else:
         # ⚠️ AVISO GENERAL
         titulo = "⚠️ AVISO IMPORTANTE"
-        color = "#f39c12"
+        color = COLOR_ADVERTENCIA
+        icono = "⚠️"
 
         mensaje = (
             f"No entregas registradas: {no_entregas} de 4\n"
@@ -124,38 +139,53 @@ def mostrar_ventana_control_unificada(
                 f"Fecha: {formatear_fecha(fecha_entrada)}\n\n"
             ) + mensaje
 
+    # Icono
+    tk.Label(
+        frame,
+        text=icono,
+        font=("Segoe UI", 28),
+        fg=color,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 10))
+
     tk.Label(
         frame,
         text=titulo,
-        font=("Arial", 14, "bold"),
+        font=("Segoe UI", 16, "bold"),
         fg=color,
-        bg="#ffffff"
+        bg=COLOR_TARJETA
     ).pack(pady=(0, 15))
 
     tk.Label(
         frame,
         text=mensaje,
-        font=("Arial", 11),
-        fg="#2c3e50",
-        bg="#ffffff",
+        font=FUENTE_CUERPO,
+        fg=COLOR_TEXTO,
+        bg=COLOR_TARJETA,
         justify=tk.CENTER,
         wraplength=420
-    ).pack(pady=10)
+    ).pack(pady=15, fill=tk.X)
 
+    # Botón moderno
+    btn_frame = tk.Frame(frame, bg=COLOR_TARJETA)
+    btn_frame.pack(pady=20)
+    
     tk.Button(
-        frame,
+        btn_frame,
         text="ENTENDIDO",
-        font=("Arial", 11, "bold"),
-        bg="#3498db",
+        font=FUENTE_BOTON,
+        bg=COLOR_PRIMARIO,
         fg="white",
-        padx=25,
-        pady=8,
+        padx=30,
+        pady=10,
+        bd=0,
+        cursor="hand2",
+        activebackground=COLOR_SECUNDARIO,
         command=ventana_ctrl.destroy
-    ).pack(pady=20)
+    ).pack()
 
     # ⏸️ ESPERAR a que el usuario cierre la ventana
     ventana_ctrl.wait_window()
-
 
 def incrementar_no_entregas(matricula):
     """
@@ -185,7 +215,6 @@ def incrementar_no_entregas(matricula):
     except Exception as e:
         print(f"Error al incrementar no entregas: {e}")
         return 0, "ACTIVO"
-
 
 def obtener_control_alumno(matricula):
     """
@@ -217,29 +246,44 @@ def mostrar_instrucciones_iniciales(matricula=""):
     ventana_info = tk.Toplevel(ventana)
     ventana_info.title("Instrucciones de Uso")
     ventana_info.resizable(False, False)
-    ventana_info.configure(bg="#ffffff")
-    ventana_info.attributes('-topmost', True)
+    ventana_info.configure(bg=COLOR_FONDO)
 
-    ancho = 500
-    alto = 360
+    # Modal correcta (SIN topmost)
+    ventana_info.transient(ventana)
+    ventana_info.grab_set()
+    ventana_info.focus_force()
+
+    ancho = 560
+    alto = 400
 
     x = (ventana_info.winfo_screenwidth() - ancho) // 2
     y = (ventana_info.winfo_screenheight() - alto) // 2
     ventana_info.geometry(f"{ancho}x{alto}+{x}+{y}")
 
-    ventana_info.transient(ventana)
-    ventana_info.grab_set()
-
-    frame = tk.Frame(ventana_info, bg="#ffffff", padx=25, pady=20)
+    frame = tk.Frame(
+        ventana_info,
+        bg=COLOR_TARJETA,
+        padx=35,
+        pady=30
+    )
     frame.pack(fill=tk.BOTH, expand=True)
+
+    # Icono de información
+    tk.Label(
+        frame,
+        text="📋",
+        font=("Segoe UI", 32),
+        fg=COLOR_PRIMARIO,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 15))
 
     tk.Label(
         frame,
         text="INSTRUCCIONES IMPORTANTES",
-        font=("Arial", 14, "bold"),
-        fg="#2c3e50",
-        bg="#ffffff"
-    ).pack(pady=(0, 15))
+        font=("Segoe UI", 16, "bold"),
+        fg=COLOR_TEXTO,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 20))
 
     texto = (
         "• Ingresa tu matrícula correctamente.\n\n"
@@ -252,25 +296,26 @@ def mostrar_instrucciones_iniciales(matricula=""):
     tk.Label(
         frame,
         text=texto,
-        font=("Arial", 11),
-        fg="#34495e",
-        bg="#ffffff",
+        font=FUENTE_CUERPO,
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA,
         justify=tk.LEFT,
-        wraplength=440
-    ).pack(pady=10)
+        wraplength=480
+    ).pack(pady=15, fill=tk.X)
 
     tk.Button(
         frame,
         text="✔ ENTENDIDO",
-        font=("Arial", 11, "bold"),
-        bg="#27ae60",
+        font=FUENTE_BOTON,
+        bg=COLOR_EXITO,
         fg="white",
-        padx=25,
-        pady=8,
+        activebackground="#2ecc71",
+        padx=35,
+        pady=12,
+        bd=0,
+        cursor="hand2",
         command=ventana_info.destroy
-    ).pack(pady=15)
-
-
+    ).pack(pady=20)
 
 def bloquear_alt_f4(event):
     """
@@ -295,7 +340,6 @@ def cerrar_sistema_admin(event=None):
         except:
             os._exit(0)
 
-
 def cargar_logo(ruta_imagen, ancho, alto):
     """Carga y redimensiona el logo"""
     if not PIL_DISPONIBLE:
@@ -318,10 +362,10 @@ def verificar_internet():
 def conectar_google_sheets():
     global hoja_alumnos, hoja_registros
     if not verificar_internet():
-        cambiar_estado("🔴 Sin conexión a internet")
+        cambiar_estado("🔴 Sin conexión a internet", COLOR_ERROR)
         return False
     
-    cambiar_estado("🟡 Conectando...")
+    cambiar_estado("🟡 Conectando...", COLOR_ADVERTENCIA)
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
@@ -329,12 +373,12 @@ def conectar_google_sheets():
         sheet = client.open("Control de Laptops")
         hoja_alumnos = sheet.worksheet("Alumnos")
         hoja_registros = sheet.worksheet("Registros")
-        cambiar_estado("🟢 Conectado")
+        cambiar_estado("🟢 Conectado", COLOR_EXITO)
         return True
     except Exception as e:
         hoja_alumnos = None
         hoja_registros = None
-        cambiar_estado("🔴 Error en la conexión")
+        cambiar_estado("🔴 Error en la conexión", COLOR_ERROR)
         return False
 
 def verificar_conexion_periodicamente():
@@ -352,9 +396,9 @@ def verificar_conexion_periodicamente():
                         mensaje_espera.destroy()
                         mensaje_espera = None
             else:
-                cambiar_estado("🟢 Conectado")
+                cambiar_estado("🟢 Conectado", COLOR_EXITO)
         else:
-            cambiar_estado("🔴 Sin conexión a internet")
+            cambiar_estado("🔴 Sin conexión a internet", COLOR_ERROR)
             if hoja_alumnos is None or hoja_registros is None:
                 conectar_google_sheets()
         
@@ -441,6 +485,34 @@ def procesar_no_entrega_si_corresponde(matricula):
     except Exception as e:
         print(f"Error al procesar no entrega: {e}")
 
+def verificar_sesion_activa_en_otra_laptop(matricula):
+    """
+    Verifica si la matrícula ya tiene una sesión activa
+    en otra laptop distinta.
+    """
+    try:
+        if hoja_registros is None:
+            return False, None
+
+        registros = hoja_registros.get_all_values()
+        laptop_actual = socket.gethostname()
+
+        for fila in reversed(registros):
+            if fila[0] == matricula:
+                hora_salida = fila[4].strip()
+                laptop_registrada = fila[5] if len(fila) > 5 else "N/A"
+
+                # Sesión activa en otra laptop
+                if hora_salida == "" and laptop_registrada != laptop_actual:
+                    return True, laptop_registrada
+                break
+
+    except Exception as e:
+        print(f"Error al verificar sesión activa: {e}")
+
+    return False, None
+
+
 def registrar_entrada(matricula):
     try:
         if hoja_registros is None:
@@ -474,7 +546,7 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
         try:
             # Verificar conexión antes de intentar
             if not verificar_internet():
-                cambiar_estado("🔴 Sin conexión - Reintentando...")
+                cambiar_estado("🔴 Sin conexión - Reintentando...", COLOR_ERROR)
                 time.sleep(2)  # Esperar antes de reintentar
                 continue
                 
@@ -493,7 +565,7 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
                 if registros[i][0] == matricula and registros[i][4] == "":
                     hoja_registros.update_cell(i+1, 5, hora)
                     hoja_registros.update_cell(i+1, 8, bateria_salida)
-                    cambiar_estado("🟢 Salida registrada correctamente")
+                    cambiar_estado("🟢 Salida registrada correctamente", COLOR_EXITO)
                     return True  # Éxito
             
             # Si llegamos aquí, no se encontró registro pendiente
@@ -506,7 +578,7 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
                 time.sleep(2)
     
     # Si fallan todos los reintentos
-    cambiar_estado("🔴 Error al registrar salida")
+    cambiar_estado("🔴 Error al registrar salida", COLOR_ERROR)
     return False
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
@@ -515,51 +587,53 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     ventana_espera = tk.Toplevel(ventana_entrega)
     ventana_espera.title("Registrando Salida")
     ventana_espera.resizable(False, False)
-    ventana_espera.geometry("350x200")
-    ventana_espera.configure(bg="#ffffff")
+    ventana_espera.geometry("400x220")
+    ventana_espera.configure(bg=COLOR_FONDO)
     ventana_espera.attributes('-topmost', True)
     
     # Centrar ventana
     ventana_espera.transient(ventana_entrega)
     ventana_espera.grab_set()
     
-    frame = tk.Frame(ventana_espera, bg="#ffffff", padx=20, pady=20)
+    frame = tk.Frame(ventana_espera, bg=COLOR_TARJETA, padx=25, pady=25)
     frame.pack(fill=tk.BOTH, expand=True)
     
+    # Icono de carga
     tk.Label(frame, 
-             text="🔄 Registrando salida...",
-             font=("Arial", 12, "bold"),
-             bg="#ffffff").pack(pady=10)
+             text="🔄",
+             font=("Segoe UI", 20),
+             bg=COLOR_TARJETA).pack(pady=(0, 10))
+    
+    tk.Label(frame, 
+             text="Registrando salida...",
+             font=("Segoe UI", 12, "bold"),
+             bg=COLOR_TARJETA).pack(pady=5)
     
     tk.Label(frame, 
              text="Por favor espere mientras se guarda la información",
-             font=("Arial", 9),
-             bg="#ffffff",
-             wraplength=300).pack(pady=5)
+             font=FUENTE_PEQ,
+             fg=COLOR_TEXTO_SECUNDARIO,
+             bg=COLOR_TARJETA,
+             wraplength=350).pack(pady=5)
     
-    # Barra de progreso simulada
-    progress_frame = tk.Frame(frame, bg="#ffffff")
+    # Barra de progreso
+    progress_frame = tk.Frame(frame, bg=COLOR_TARJETA)
     progress_frame.pack(pady=15)
     
-    progress_bar = tk.Frame(progress_frame, height=8, bg="#ecf0f1", width=250)
+    progress_bar = tk.Frame(progress_frame, height=6, bg=COLOR_BORDE, width=300)
     progress_bar.pack()
-    progress_bar_inner = tk.Frame(progress_bar, height=8, bg="#3498db", width=0)
+    progress_bar_inner = tk.Frame(progress_bar, height=6, bg=COLOR_PRIMARIO, width=0)
     progress_bar_inner.place(relx=0, rely=0, relheight=1)
     
     estado_label = tk.Label(frame, 
                            text="Conectando...",
-                           font=("Arial", 9),
-                           bg="#ffffff")
+                           font=FUENTE_PEQ,
+                           fg=COLOR_TEXTO_SECUNDARIO,
+                           bg=COLOR_TARJETA)
     estado_label.pack(pady=5)
     
-    btn_cancelar = tk.Button(frame,
-                            text="Cancelar",
-                            font=("Arial", 9),
-                            command=lambda: ventana_espera.destroy())
-    btn_cancelar.pack(pady=10)
-    
     def actualizar_progreso(progreso, mensaje):
-        progress_bar_inner.config(width=progreso * 2.5)
+        progress_bar_inner.config(width=progreso * 50)
         estado_label.config(text=mensaje)
         ventana_espera.update()
     
@@ -611,18 +685,6 @@ def entregar_y_apagar(ventana, matricula, nombre):
     # Mostrar ventana de espera mientras se registra
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
 
-# --- INTERFAZ GRAFICA ---
-
-class RoundedEntry(tk.Entry):
-    def __init__(self, master=None, **kwargs):
-        tk.Entry.__init__(self, master, **kwargs)
-        self.config(relief='flat', bg='#ecf0f1')
-
-class RoundedButton(tk.Button):
-    def __init__(self, master=None, **kwargs):
-        tk.Button.__init__(self, master, **kwargs)
-        self.config(relief='flat', bd=0, cursor='hand2')
-
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
     
@@ -630,70 +692,91 @@ def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega.transient(None)
     ventana_entrega.title("Entrega de Laptop")
     ventana_entrega.resizable(False, False)
+    ventana_entrega.configure(bg=COLOR_FONDO)
 
     # ❌ Bloquear cerrar, pero NO minimizar
     ventana_entrega.protocol("WM_DELETE_WINDOW", lambda: None)
 
-    ventana_entrega.configure(bg="#ffffff")
-
-    # ❌ NO topmost permanente
-    # (esto es lo que rompía minimizar)
-    ventana_entrega.attributes('-topmost', False)
-
     # Permitir minimizar
-    ventana_entrega.minsize(380, 400)
+    ventana_entrega.minsize(420, 480)
 
     frame_principal = tk.Frame(
         ventana_entrega,
-        bg="#ffffff",
-        padx=30,
-        pady=25
+        bg=COLOR_TARJETA,
+        padx=35,
+        pady=30
     )
     frame_principal.pack(fill=tk.BOTH, expand=True)
 
     # Logo
-    logo_entrega = cargar_logo("UTP.png", 100, 60)
+    logo_entrega = cargar_logo("UTP.png", 120, 70)
     if logo_entrega:
-        lbl_logo = tk.Label(frame_principal, image=logo_entrega, bg="#ffffff")
+        lbl_logo = tk.Label(frame_principal, image=logo_entrega, bg=COLOR_TARJETA)
         lbl_logo.image = logo_entrega
-        lbl_logo.pack(pady=(0, 15))
+        lbl_logo.pack(pady=(0, 20))
+
+    # Icono de laptop
+    tk.Label(
+        frame_principal,
+        text="💻",
+        font=("Segoe UI", 28),
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 10))
 
     tk.Label(
         frame_principal,
         text="Sistema de Control de Laptops",
-        font=("Arial", 12, "bold"),
-        bg="#ffffff"
-    ).pack(pady=(0, 15))
+        font=FUENTE_SUBTITULO,
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 5))
 
     tk.Label(
         frame_principal,
         text=f"Bienvenid@, {nombre}",
-        font=("Arial", 14, "bold"),
-        fg="#27ae60",
-        bg="#ffffff"
-    ).pack(pady=(0, 20))
+        font=("Segoe UI", 16, "bold"),
+        fg=COLOR_EXITO,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 25))
 
-    RoundedButton(
+    # Botón principal
+    tk.Button(
         frame_principal,
-        text="🚀 Entregar y Apagar",
-        font=("Arial", 12, "bold"),
-        bg="#e74c3c",
+        text="🚀 ENTREGAR Y APAGAR",
+        font=FUENTE_BOTON,
+        bg=COLOR_ERROR,
         fg="white",
-        padx=25,
-        pady=10,
+        padx=30,
+        pady=15,
+        bd=0,
+        cursor="hand2",
+        activebackground="#c23616",
         command=lambda: entregar_y_apagar(ventana_entrega, matricula, nombre)
-    ).pack(pady=15)
+    ).pack(pady=20)
 
     tk.Label(
         frame_principal,
         text="La laptop se apagará automáticamente",
-        font=("Arial", 9),
-        fg="#7f8c8d",
-        bg="#ffffff"
+        font=FUENTE_PEQ,
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA
     ).pack(pady=(10, 0))
 
+    # Información adicional
+    info_frame = tk.Frame(frame_principal, bg=COLOR_FONDO, padx=15, pady=10)
+    info_frame.pack(pady=20, fill=tk.X)
+    
+    hora, fecha = obtener_hora_internet()
+    tk.Label(
+        info_frame,
+        text=f"📅 {fecha} | 🕒 {hora}",
+        font=FUENTE_PEQ,
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_FONDO
+    ).pack()
+
     # Centrar ventana
-    ancho, alto = 380, 400
+    ancho, alto = 420, 480
     x = (ventana_entrega.winfo_screenwidth() - ancho) // 2
     y = (ventana_entrega.winfo_screenheight() - alto) // 2
     ventana_entrega.geometry(f"{ancho}x{alto}+{x}+{y}")
@@ -740,6 +823,22 @@ def mostrar_confirmacion_simple(nombre, matricula):
         entrada.delete(0, tk.END)
         entrada.focus()
         return
+
+    # 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
+    sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
+
+    if sesion_activa:
+        messagebox.showerror(
+            "Sesión activa detectada",
+            f"Esta matrícula ya tiene una sesión activa en otra laptop.\n\n"
+            f"Laptop registrada: {laptop_otro}\n\n"
+            "Debes entregar primero el equipo anterior."
+        )
+        reiniciar_estado_sistema()
+        entrada.delete(0, tk.END)
+        entrada.focus()
+        return
+
 
     # 2. 🔥 CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
     procesar_no_entrega_si_corresponde(matricula)
@@ -788,9 +887,10 @@ def mostrar_confirmacion_simple(nombre, matricula):
         lambda: mostrar_ventana_entrega(nombre, matricula)
     )
 
-
-def cambiar_estado(texto):
+def cambiar_estado(texto, color=None):
     estado_var.set(texto)
+    if color:
+        estado_label.config(fg=color)
     ventana.update_idletasks()
 
 def verificar_conexion_base_datos():
@@ -811,9 +911,9 @@ def reiniciar_estado_sistema():
     btn_entrar.config(state="normal")
     # Actualizar estado de conexión actual
     if verificar_conexion_base_datos():
-        cambiar_estado("🟢 Conectado")
+        cambiar_estado("🟢 Conectado", COLOR_EXITO)
     else:
-        cambiar_estado("🔴 Sin conexión")
+        cambiar_estado("🔴 Sin conexión", COLOR_ERROR)
 
 def mostrar_aviso_internet_bloqueante():
     """Muestra un aviso emergente bloqueante que no se puede mover, cerrar ni minimizar"""
@@ -823,13 +923,13 @@ def mostrar_aviso_internet_bloqueante():
     aviso_internet.title("Conexión Requerida")
     
     # Hacer la ventana completamente bloqueante
-    aviso_internet.attributes('-topmost', True)  # Siempre encima
-    aviso_internet.resizable(False, False)  # No redimensionable
-    aviso_internet.overrideredirect(True)  # Sin barra de título (no se puede mover, cerrar, minimizar)
+    aviso_internet.attributes('-topmost', True)
+    aviso_internet.resizable(False, False)
+    aviso_internet.overrideredirect(True)
     
-    # Configurar tamaño y posición (centrada)
+    # Configurar tamaño y posición
     ancho_aviso = 500
-    alto_aviso = 300
+    alto_aviso = 320
     
     pantalla_ancho = aviso_internet.winfo_screenwidth()
     pantalla_alto = aviso_internet.winfo_screenheight()
@@ -837,74 +937,73 @@ def mostrar_aviso_internet_bloqueante():
     y = (pantalla_alto - alto_aviso) // 2
     
     aviso_internet.geometry(f"{ancho_aviso}x{alto_aviso}+{x}+{y}")
-    aviso_internet.configure(bg="#1a5276")
+    aviso_internet.configure(bg=COLOR_PRIMARIO)
     
     # Frame principal
-    frame_aviso = tk.Frame(aviso_internet, bg="#ffffff", bd=2, relief=tk.RAISED)
-    frame_aviso.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    frame_aviso = tk.Frame(aviso_internet, bg=COLOR_TARJETA, bd=0, relief=tk.FLAT)
+    frame_aviso.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
     
     # Logo
-    logo_aviso = cargar_logo("UTP.png", 80, 50)
+    logo_aviso = cargar_logo("UTP.png", 70, 45)
     if logo_aviso:
-        lbl_logo_aviso = tk.Label(frame_aviso, image=logo_aviso, bg="#ffffff")
+        lbl_logo_aviso = tk.Label(frame_aviso, image=logo_aviso, bg=COLOR_TARJETA)
         lbl_logo_aviso.image = logo_aviso
-        lbl_logo_aviso.pack(pady=(20, 10))
-    else:
-        tk.Label(frame_aviso, text="🏢", font=("Arial", 24), bg="#ffffff").pack(pady=(20, 5))
-        tk.Label(frame_aviso, text="UTP", font=("Arial", 12, "bold"), fg="#2c3e50", bg="#ffffff").pack()
+        lbl_logo_aviso.pack(pady=(25, 10))
     
     # Icono de advertencia
     tk.Label(frame_aviso, 
              text="🔴",
-             font=("Arial", 28),
-             bg="#ffffff").pack(pady=(10, 15))
+             font=("Segoe UI", 32),
+             bg=COLOR_TARJETA).pack(pady=(10, 15))
     
     # Mensaje principal
     tk.Label(frame_aviso, 
              text="NO SE HA DETECTADO CONEXIÓN A INTERNET",
-             font=("Arial", 12, "bold"),
-             fg="#e74c3c",
-             bg="#ffffff").pack(pady=(0, 10))
+             font=("Segoe UI", 13, "bold"),
+             fg=COLOR_ERROR,
+             bg=COLOR_TARJETA).pack(pady=(0, 10))
     
     # Instrucciones
     tk.Label(frame_aviso, 
              text="Para utilizar el sistema es necesario contar con conexión a internet.",
-             font=("Arial", 9),
-             bg="#ffffff",
+             font=FUENTE_CUERPO,
+             fg=COLOR_TEXTO,
+             bg=COLOR_TARJETA,
              wraplength=400,
              justify=tk.CENTER).pack(pady=(0, 5))
     
     tk.Label(frame_aviso, 
              text="Conecte la computadora a internet para continuar.",
-             font=("Arial", 9, "bold"),
-             bg="#ffffff",
+             font=FUENTE_CUERPO_BOLD,
+             fg=COLOR_TEXTO,
+             bg=COLOR_TARJETA,
              wraplength=400,
-             justify=tk.CENTER).pack(pady=(0, 15))
+             justify=tk.CENTER).pack(pady=(0, 20))
     
     # Barra de progreso animada
-    progress_frame = tk.Frame(frame_aviso, bg="#ffffff")
-    progress_frame.pack(pady=10)
+    progress_frame = tk.Frame(frame_aviso, bg=COLOR_TARJETA)
+    progress_frame.pack(pady=15)
     
-    progress_bar = tk.Frame(progress_frame, height=6, bg="#ecf0f1", width=350)
+    progress_bar = tk.Frame(progress_frame, height=8, bg=COLOR_BORDE, width=350)
     progress_bar.pack()
-    progress_bar_inner = tk.Frame(progress_bar, height=6, bg="#3498db", width=0)
+    progress_bar_inner = tk.Frame(progress_bar, height=8, bg=COLOR_PRIMARIO, width=0)
     progress_bar_inner.place(relx=0, rely=0, relheight=1)
     
     # Mensaje de estado
     estado_label = tk.Label(frame_aviso, 
                            text="Verificando conexión...",
-                           font=("Arial", 9),
-                           fg="#7f8c8d",
-                           bg="#ffffff")
+                           font=FUENTE_PEQ,
+                           fg=COLOR_TEXTO_SECUNDARIO,
+                           bg=COLOR_TARJETA)
     estado_label.pack(pady=5)
     
     # Contador de tiempo
     tiempo_inicio = time.time()
     tiempo_label = tk.Label(frame_aviso, 
                            text="Tiempo esperando: 0 segundos",
-                           font=("Arial", 8),
-                           fg="#95a5a6",
-                           bg="#ffffff")
+                           font=FUENTE_PEQ,
+                           fg=COLOR_TEXTO_SECUNDARIO,
+                           bg=COLOR_TARJETA)
     tiempo_label.pack(pady=2)
     
     # Función para animar la barra de progreso
@@ -929,7 +1028,7 @@ def mostrar_aviso_internet_bloqueante():
         if verificar_internet():
             # Internet detectado, cerrar aviso
             aviso_internet.destroy()
-            cambiar_estado("🟢 Conectado")
+            cambiar_estado("🟢 Conectado", COLOR_EXITO)
             # Intentar conectar a Google Sheets
             threading.Thread(target=conectar_google_sheets, daemon=True).start()
         else:
@@ -946,16 +1045,23 @@ def mostrar_aviso_internet_bloqueante():
     direccion = 1
     animar_barra_progreso()
     aviso_internet.after(500, verificar_internet_continuamente)
-
 def iniciar_sesion():
     global procesando_sesion
 
     if procesando_sesion:
         return
 
+    # 🔐 Validar términos y condiciones
+    if not terminos_var.get():
+        messagebox.showwarning(
+            "Términos y Condiciones",
+            "Debes aceptar los Términos y Condiciones para continuar."
+        )
+        return
+
     procesando_sesion = True
     btn_entrar.config(state="disabled")
-    cambiar_estado("🟡 Verificando conexión...")
+    cambiar_estado("🟡 Verificando conexión...", COLOR_ADVERTENCIA)
     ventana.update()
 
     matricula = entrada.get().strip()
@@ -994,163 +1100,258 @@ def iniciar_sesion():
         reiniciar_estado_sistema()
         return
 
-    # 👉 SOLO confirmación, sin try/except
     mostrar_confirmacion_simple(nombre, matricula)
+
+def mostrar_terminos_modal():
+    ventana_tc = tk.Toplevel(ventana)
+    ventana_tc.title("Términos y Condiciones")
+    ventana_tc.configure(bg=COLOR_FONDO)
+
+    ventana_tc.transient(ventana)
+    ventana_tc.grab_set()
+    ventana_tc.focus_force()
+
+    ancho, alto = 900, 600
+    x = (ventana_tc.winfo_screenwidth() - ancho) // 2
+    y = (ventana_tc.winfo_screenheight() - alto) // 2
+    ventana_tc.geometry(f"{ancho}x{alto}+{x}+{y}")
+
+    # ===== GRID PRINCIPAL =====
+    ventana_tc.rowconfigure(0, weight=1)
+    ventana_tc.columnconfigure(0, weight=1)
+
+    contenedor = tk.Frame(ventana_tc, bg=COLOR_TARJETA)
+    contenedor.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+
+    contenedor.rowconfigure(1, weight=1)
+    contenedor.columnconfigure(0, weight=1)
+
+    # ===== TÍTULO =====
+    tk.Label(
+        contenedor,
+        text="TÉRMINOS Y CONDICIONES DE USO DEL SERVICIO",
+        font=("Segoe UI", 16, "bold"),
+        bg=COLOR_TARJETA,
+        fg=COLOR_TEXTO
+    ).grid(row=0, column=0, pady=(0, 15))
+
+    # ===== ÁREA DE TEXTO =====
+    frame_texto = tk.Frame(contenedor, bg=COLOR_TARJETA)
+    frame_texto.grid(row=1, column=0, sticky="nsew")
+
+    frame_texto.rowconfigure(0, weight=1)
+    frame_texto.columnconfigure(0, weight=1)
+
+    texto = tk.Text(
+        frame_texto,
+        wrap=tk.WORD,
+        font=("Segoe UI", 10),
+        bg="#f9f9f9",
+        fg=COLOR_TEXTO,
+        padx=60,
+        pady=25,
+        relief=tk.FLAT
+    )
+    texto.grid(row=0, column=0, sticky="nsew")
+
+    scrollbar = tk.Scrollbar(frame_texto, command=texto.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    texto.config(yscrollcommand=scrollbar.set)
+
+    # ===== CARGAR ARCHIVO TXT =====
+    try:
+        with open("terminos_condiciones.txt", "r", encoding="utf-8") as f:
+            texto.insert(tk.END, f.read())
+    except:
+        texto.insert(tk.END, "No se pudieron cargar los Términos y Condiciones.")
+
+    texto.config(state=tk.DISABLED)
+
+    # ===== BOTÓN CERRAR =====
+    tk.Button(
+        contenedor,
+        text="CERRAR",
+        font=FUENTE_BOTON,
+        bg=COLOR_PRIMARIO,
+        fg="white",
+        bd=0,
+        padx=30,
+        pady=12,
+        cursor="hand2",
+        command=ventana_tc.destroy
+    ).grid(row=2, column=0, pady=(15, 0))
+
+
+def crear_pantalla_login():
+    global entrada, btn_entrar, estado_var, estado_label, terminos_var
+
+    for widget in ventana.winfo_children():
+        widget.destroy()
+
+    ventana.configure(bg=COLOR_FONDO)
+
+    def forzar_mayusculas(event):
+        texto = entrada.get()
+        entrada.delete(0, tk.END)
+        entrada.insert(0, texto.upper())
+
+    main_container = tk.Frame(ventana, bg=COLOR_FONDO)
+    main_container.pack(fill=tk.BOTH, expand=True)
+
+    card = tk.Frame(
+        main_container,
+        bg=COLOR_TARJETA,
+        width=460,
+        height=640,
+        highlightthickness=1,
+        highlightbackground=COLOR_BORDE
+    )
+    card.place(relx=0.5, rely=0.5, anchor="center")
+    card.pack_propagate(False)
+
+    # LOGO
+    logo = cargar_logo("UTP.png", 150, 95)
+    if logo:
+        lbl_logo = tk.Label(card, image=logo, bg=COLOR_TARJETA)
+        lbl_logo.image = logo
+        lbl_logo.pack(pady=(35, 15))
+
+    tk.Label(
+        card,
+        text="SISTEMA DE CONTROL\nDE LAPTOPS",
+        font=("Segoe UI", 18, "bold"),
+        fg=COLOR_TEXTO,
+        bg=COLOR_TARJETA
+    ).pack()
+
+    tk.Label(
+        card,
+        text="Universidad Tecnológica de Parral",
+        font=("Segoe UI", 11),
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA
+    ).pack(pady=(0, 30))
+
+    # ENTRADA
+    input_frame = tk.Frame(card, bg=COLOR_TARJETA)
+    input_frame.pack(padx=50, fill=tk.X)
+
+    tk.Label(
+        input_frame,
+        text="INGRESA TU MATRÍCULA",
+        font=("Segoe UI", 10, "bold"),
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA
+    ).pack(anchor="w", pady=(0, 8))
+
+    entrada = tk.Entry(
+        input_frame,
+        font=("Segoe UI", 16),
+        justify="center",
+        bg="#f8f9fa",
+        fg=COLOR_TEXTO,
+        highlightthickness=2,
+        highlightbackground=COLOR_BORDE,
+        highlightcolor=COLOR_PRIMARIO
+    )
+    entrada.pack(fill=tk.X, ipady=12)
+    entrada.focus()
+
+    entrada.bind("<KeyRelease>", forzar_mayusculas)
+    entrada.bind("<Return>", lambda e: iniciar_sesion())
+
+    # =========================
+    # TÉRMINOS Y CONDICIONES
+    # =========================
+    terminos_var = tk.BooleanVar(value=False)
+
+    terminos_frame = tk.Frame(card, bg=COLOR_TARJETA)
+    terminos_frame.pack(padx=50, pady=(20, 25), anchor="w")
+
+    tk.Checkbutton(
+        terminos_frame,
+        text="Acepto los ",
+        variable=terminos_var,
+        font=("Segoe UI", 12),
+        bg=COLOR_TARJETA,
+        activebackground=COLOR_TARJETA
+    ).pack(side=tk.LEFT)
+
+    link = tk.Label(
+        terminos_frame,
+        text="Términos y Condiciones",
+        font=("Segoe UI", 12, "underline"),
+        fg=COLOR_PRIMARIO,
+        bg=COLOR_TARJETA,
+        cursor="hand2"
+    )
+    link.pack(side=tk.LEFT)
+    link.bind("<Button-1>", lambda e: mostrar_terminos_modal())
+
+    # =========================
+    # BOTÓN INGRESAR
+    # =========================
+    btn_entrar = tk.Button(
+        card,
+        text="INGRESAR AL SISTEMA",
+        font=FUENTE_BOTON,
+        bg=COLOR_PRIMARIO,
+        fg="white",
+        activebackground=COLOR_SECUNDARIO,
+        bd=0,
+        padx=20,
+        pady=14,
+        cursor="hand2",
+        command=iniciar_sesion
+    )
+    btn_entrar.pack(fill=tk.X, padx=50, pady=(5, 20))
+
+    # =========================
+    # ESTADO DE CONEXIÓN
+    # =========================
+    estado_var = tk.StringVar(value="🟢 Conectado")
+    estado_label = tk.Label(
+        card,
+        textvariable=estado_var,
+        font=("Segoe UI", 10, "bold"),
+        fg=COLOR_EXITO,
+        bg=COLOR_TARJETA
+    )
+    estado_label.pack(pady=(5, 10))
+
+    # =========================
+    # VERSIÓN (ESQUINA)
+    # =========================
+    tk.Label(
+        card,
+        text=f"Versión {VERSION_SISTEMA}",
+        font=("Segoe UI", 9),
+        fg=COLOR_TEXTO_SECUNDARIO,
+        bg=COLOR_TARJETA
+    ).place(relx=0.98, rely=0.98, anchor="se")
+
+
 
 
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
-ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | {VERSION_SISTEMA} (trabajo)")
+ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | {VERSION_SISTEMA}")
 
-
-# ✅ CONFIGURACIÓN MÁS PERMISIVA PARA LA VENTANA PRINCIPAL
-ventana.attributes('-topmost', True)
+# Pantalla completa sin bordes
+ventana.attributes("-topmost", True)
 ventana.state("zoomed")
 ventana.overrideredirect(True)
-ventana.configure(bg=COLOR_FONDO_APP)
+ventana.configure(bg=COLOR_FONDO)
 
-# ✅ EVITAR GRAB_SET PARA PERMITIR MINIMIZAR
-ventana.focus_force()
+# 👉 AQUÍ SE CREA EL LOGIN
+crear_pantalla_login()
 
-# Frame principal
-# Sombra
-sombra = tk.Frame(
-    ventana,
-    bg="#0a2236"
-)
-sombra.place(relx=0.5, rely=0.5, anchor="center", width=470, height=600)
-
-# Tarjeta principal
-main_frame = tk.Frame(
-    ventana,
-    bg=COLOR_TARJETA,
-    bd=0,
-    relief=tk.FLAT,
-    width=450,
-    height=580
-)
-main_frame.place(relx=0.5, rely=0.5, anchor="center")
-
-# Evitar que el frame se redimensione
-main_frame.pack_propagate(False)
-
-# LOGO PRINCIPAL
-logo_principal = cargar_logo("UTP.png", 160, 120)
-
-if logo_principal:
-    lbl_logo = tk.Label(main_frame, image=logo_principal, bg="#ffffff")
-    lbl_logo.image = logo_principal
-    lbl_logo.pack(pady=(25, 15))
-else:
-    tk.Label(main_frame, text="🏢", font=("Arial", 40), bg="#ffffff").pack(pady=(25, 10))
-    tk.Label(main_frame, text="UTP", font=("Arial", 20, "bold"), fg="#2c3e50", bg="#ffffff").pack(pady=(0, 5))
-
-# Títulos
-tk.Label(
-    main_frame,
-    text="SISTEMA DE CONTROL",
-    font=FUENTE_TITULO,
-    fg=COLOR_TEXTO,
-    bg=COLOR_TARJETA
-).pack(pady=(0, 2))
-
-tk.Label(
-    main_frame,
-    text="DE LAPTOPS",
-    font=FUENTE_TITULO,
-    fg=COLOR_TEXTO,
-    bg=COLOR_TARJETA
-).pack(pady=(0, 20))
-
-
-# Línea decorativa
-tk.Frame(main_frame, height=1, bg=COLOR_LINEA, bd=0).pack(fill=tk.X, padx=50, pady=15)
-
-# Instrucción
-tk.Label(
-    main_frame,
-    text="INGRESA TU MATRÍCULA",
-    font=FUENTE_SUBTITULO,
-    fg=COLOR_SECUNDARIO,
-    bg=COLOR_TARJETA
-).pack(pady=(0, 15))
-
-
-# Campo de entrada
-entrada_frame = tk.Frame(main_frame, bg="#ecf0f1", relief=tk.FLAT, bd=0)
-entrada_frame.pack(pady=7)
-
-entrada = RoundedEntry(
-    entrada_frame,
-    font=("Segoe UI", 16),
-                      width=23,
-                      fg="#2c3e50",
-                      insertbackground="#3498db",
-                      justify=tk.CENTER)
-entrada.pack(pady=4, ipady=4, padx=4)
-entrada.focus()
-entrada.bind("<Return>", lambda event: iniciar_sesion())
-
-# Botón
-btn_entrar = RoundedButton(
-    main_frame,
-    text="🔐 INGRESAR",
-    font=FUENTE_BOTON,
-    bg=COLOR_PRIMARIO,
-    fg="white",
-    activebackground="#16a085",
-    activeforeground="white",
-    padx=35,
-    pady=12,
-    command=iniciar_sesion
-)
-
-btn_entrar.pack(pady=15)
-
-# Estado de conexión a la derecha
-estado_var = tk.StringVar(value="🟡 Conectando...")
-estado_label = tk.Label(main_frame, 
-                        textvariable=estado_var, 
-                        font=("Arial", 10, "bold"),
-                        fg="#27ae60", 
-                        bg="#ffffff")
-estado_label.pack(pady=5, anchor='e', padx=20)
-
-# Footer (Universidad + versión)
-footer_frame = tk.Frame(main_frame, bg="#ffffff")
-footer_frame.pack(side=tk.BOTTOM, pady=(0, 20))
-
-
-tk.Label(
-    footer_frame,
-    text="UNIVERSIDAD TECNOLÓGICA DE PARRAL",
-    font=FUENTE_PIE,
-    fg=COLOR_SECUNDARIO,
-    bg=COLOR_TARJETA
-).pack()
-
-
-tk.Label(
-    footer_frame,
-    text=f"Versión {VERSION_SISTEMA}",
-    font=FUENTE_PIE,
-    fg=COLOR_SECUNDARIO,
-    bg=COLOR_TARJETA
-).pack()
-
-
-
-
-
+# SEGURIDAD
 ventana.protocol("WM_DELETE_WINDOW", lambda: detener_verificacion_conexion() or ventana.destroy())
-# Combinación secreta para administrador: Ctrl + Alt + U
 ventana.bind("<Control-Alt-u>", cerrar_sistema_admin)
 ventana.bind("<Control-Alt-U>", cerrar_sistema_admin)
-# Bloquear Alt + F4
 ventana.bind_all("<Alt-F4>", bloquear_alt_f4)
-# Evitar cierre por combinación indirecta
 ventana.bind_all("<Control-F4>", bloquear_alt_f4)
-
 
 # --- INICIALIZACIÓN ---
 
