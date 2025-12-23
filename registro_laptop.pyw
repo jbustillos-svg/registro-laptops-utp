@@ -859,37 +859,37 @@ def mostrar_confirmacion_simple(nombre, matricula):
         entrada.delete(0, tk.END)
         entrada.focus()
         return
-# 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
-sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
+    # 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
+    sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
 
-if sesion_activa:
-    respuesta = messagebox.askyesno(
-        "Sesión activa detectada",
-        "Se detectó una sesión activa en otro equipo.\n\n"
-        f"Laptop anterior: {laptop_otro}\n\n"
-        "Si continúas:\n"
-        "• La sesión anterior se cerrará automáticamente\n"
-        "• Se registrará como NO ENTREGA\n"
-        "• Esta acción quedará registrada\n\n"
-        "¿Deseas continuar en este equipo?"
-    )
-
-    if not respuesta:
-        reiniciar_estado_sistema()
-        entrada.delete(0, tk.END)
-        entrada.focus()
-        return
-
-    # 🔥 Cerrar sesión anterior y contar NO ENTREGA
-    exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
-
-    if not exito:
-        messagebox.showerror(
-            "Error",
-            "No se pudo cerrar la sesión anterior.\n\nIntenta nuevamente."
+    if sesion_activa:
+        respuesta = messagebox.askyesno(
+            "Sesión activa detectada",
+            "Se detectó una sesión activa en otro equipo.\n\n"
+            f"Laptop anterior: {laptop_otro}\n\n"
+            "Si continúas:\n"
+            "• La sesión anterior se cerrará automáticamente\n"
+            "• Se registrará como NO ENTREGA\n"
+            "• Esta acción quedará registrada\n\n"
+            "¿Deseas continuar en este equipo?"
         )
-        reiniciar_estado_sistema()
-        return
+
+        if not respuesta:
+            reiniciar_estado_sistema()
+            entrada.delete(0, tk.END)
+            entrada.focus()
+            return
+
+        # 🔥 Cerrar sesión anterior y contar NO ENTREGA
+        exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
+
+        if not exito:
+            messagebox.showerror(
+                "Error",
+                "No se pudo cerrar la sesión anterior.\n\nIntenta nuevamente."
+            )
+            reiniciar_estado_sistema()
+            return
 
 
     # 2. 🔥 CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
