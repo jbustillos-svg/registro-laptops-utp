@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.4"
+VERSION_SISTEMA = "v1.0.5"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -219,7 +219,7 @@ def incrementar_no_entregas(matricula):
 def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
     """
     Cierra la sesión activa anterior del alumno,
-    registra NO ENTREGA y deja evidencia en Registros.
+    registra NO ENTREGA y deja evidencia.
     """
     try:
         if hoja_registros is None or hoja_alumnos is None:
@@ -232,17 +232,13 @@ def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
             fila = registros[i]
 
             if fila[0] == matricula:
-                hora_salida = fila[4].strip()
-                observacion = fila[7].strip() if len(fila) > 7 else ""
-
-                if hora_salida == "":
-                    # 1️⃣ Registrar salida automática
+                if fila[4].strip() == "":
                     hoja_registros.update_cell(i + 1, 5, hora_actual)
-                    hoja_registros.update_cell(i + 1, 8, "CIERRE_AUTOMATICO_POR_NUEVA_SESION")
+                    hoja_registros.update_cell(
+                        i + 1, 8, "CIERRE_AUTOMATICO_POR_NUEVA_SESION"
+                    )
 
-                    # 2️⃣ Contar NO ENTREGA
                     incrementar_no_entregas(matricula)
-
                     return True
                 break
 
@@ -521,32 +517,29 @@ def procesar_no_entrega_si_corresponde(matricula):
     except Exception as e:
         print(f"Error al procesar no entrega: {e}")
 
-def verificar_sesion_activa_en_otra_laptop(matricula):
+        
+def sesion_activa_en_esta_laptop(matricula):
     """
-    Verifica si la matrícula ya tiene una sesión activa
-    en otra laptop distinta.
+    Verifica si la sesión de la matrícula
+    sigue activa en ESTA laptop.
     """
     try:
         if hoja_registros is None:
-            return False, None
+            return False
 
-        registros = hoja_registros.get_all_values()
         laptop_actual = socket.gethostname()
+        registros = hoja_registros.get_all_values()
 
         for fila in reversed(registros):
-            if fila[0] == matricula:
-                hora_salida = fila[4].strip()
-                laptop_registrada = fila[5] if len(fila) > 5 else "N/A"
-
-                # Sesión activa en otra laptop
-                if hora_salida == "" and laptop_registrada != laptop_actual:
-                    return True, laptop_registrada
-                break
+            if fila[0] == matricula and fila[5] == laptop_actual:
+                return fila[4].strip() == ""
+            break
 
     except Exception as e:
-        print(f"Error al verificar sesión activa: {e}")
+        print(f"Error al validar sesión activa local: {e}")
 
-    return False, None
+    return False
+
 
 
 def registrar_entrada(matricula):
@@ -576,46 +569,43 @@ def registrar_entrada(matricula):
     return None
 
 def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
-    """Registra la salida con sistema de reintentos en caso de desconexión"""
-    
+    laptop_actual = socket.gethostname()
+
     for intento in range(max_reintentos):
         try:
-            # Verificar conexión antes de intentar
             if not verificar_internet():
-                cambiar_estado("🔴 Sin conexión - Reintentando...", COLOR_ERROR)
-                time.sleep(2)  # Esperar antes de reintentar
+                time.sleep(2)
                 continue
-                
-            # Reconectar si es necesario
+
             if hoja_registros is None:
                 if not conectar_google_sheets():
                     time.sleep(2)
                     continue
-            
-            # Registrar salida
+
             hora, _ = obtener_hora_internet()
             bateria_salida = obtener_porcentaje_bateria()
-            
             registros = hoja_registros.get_all_values()
+
             for i in reversed(range(len(registros))):
-                if registros[i][0] == matricula and registros[i][4] == "":
-                    hoja_registros.update_cell(i+1, 5, hora)
-                    hoja_registros.update_cell(i+1, 8, bateria_salida)
-                    cambiar_estado("🟢 Salida registrada correctamente", COLOR_EXITO)
-                    return True  # Éxito
-            
-            # Si llegamos aquí, no se encontró registro pendiente
-            print("No se encontró registro pendiente para la matrícula")
-            return True
-            
+                fila = registros[i]
+
+                if (
+                    fila[0] == matricula and
+                    fila[4] == "" and
+                    fila[5] == laptop_actual
+                ):
+                    hoja_registros.update_cell(i + 1, 5, hora)
+                    hoja_registros.update_cell(i + 1, 8, bateria_salida)
+                    return True
+
+            return False
+
         except Exception as e:
-            print(f"Error en intento {intento + 1}: {e}")
-            if intento < max_reintentos - 1:  # No esperar en el último intento
-                time.sleep(2)
-    
-    # Si fallan todos los reintentos
-    cambiar_estado("🔴 Error al registrar salida", COLOR_ERROR)
+            print(f"Error intento {intento + 1}: {e}")
+            time.sleep(2)
+
     return False
+
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     """Muestra ventana de espera mientras se intenta registrar la salida"""
@@ -716,10 +706,29 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     return ventana_espera
 
 def entregar_y_apagar(ventana, matricula, nombre):
-    """Función mejorada con manejo de errores de conexión"""
-    
-    # Mostrar ventana de espera mientras se registra
+    """
+    Si la sesión ya fue cerrada automáticamente:
+    - Muestra aviso
+    - Apaga la laptop
+    - NO registra nada
+    """
+
+    if not sesion_activa_en_esta_laptop(matricula):
+        messagebox.showwarning(
+            "Sesión cerrada",
+            "Esta sesión ya fue cerrada automáticamente.\n\n"
+            "El uso quedó registrado como NO ENTREGA.\n\n"
+            "La computadora se apagará."
+        )
+
+        ventana.destroy()
+        os.system("shutdown /s /t 3")
+        return
+
+    # Si la sesión sigue activa, flujo normal
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
+
+
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
