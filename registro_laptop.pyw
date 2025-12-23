@@ -852,6 +852,32 @@ def mostrar_aviso_entrega_pendiente(fecha_entrada, laptop_id):
     mensaje += "Recuerda siempre usar el botón 'Entregar y Apagar'"
     
     messagebox.showwarning("Entrega Pendiente", mensaje)
+def verificar_sesion_activa_en_otra_laptop(matricula):
+    """
+    Verifica si la matrícula tiene una sesión activa
+    en OTRA laptop diferente a la actual.
+    """
+    try:
+        if hoja_registros is None:
+            return False, None
+
+        laptop_actual = socket.gethostname()
+        registros = hoja_registros.get_all_values()
+
+        for fila in reversed(registros):
+            if fila[0] == matricula:
+                hora_salida = fila[4].strip()
+                laptop_registro = fila[5]
+
+                if hora_salida == "" and laptop_registro != laptop_actual:
+                    return True, laptop_registro
+                break
+
+    except Exception as e:
+        print(f"Error al verificar sesión en otra laptop: {e}")
+
+    return False, None
+
 
 def mostrar_confirmacion_simple(nombre, matricula):
     global entrada, ventana, procesando_sesion
@@ -871,7 +897,9 @@ def mostrar_confirmacion_simple(nombre, matricula):
         reiniciar_estado_sistema()
         entrada.delete(0, tk.END)
         entrada.focus()
-        return
+        return False
+
+    
     # 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
     sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
 
@@ -891,7 +919,8 @@ def mostrar_confirmacion_simple(nombre, matricula):
             reiniciar_estado_sistema()
             entrada.delete(0, tk.END)
             entrada.focus()
-            return
+            return False
+
 
         # 🔥 Cerrar sesión anterior y contar NO ENTREGA
         exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
@@ -902,7 +931,8 @@ def mostrar_confirmacion_simple(nombre, matricula):
                 "No se pudo cerrar la sesión anterior.\n\nIntenta nuevamente."
             )
             reiniciar_estado_sistema()
-            return
+            return False
+
 
 
     # 2. 🔥 CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
@@ -930,7 +960,8 @@ def mostrar_confirmacion_simple(nombre, matricula):
             reiniciar_estado_sistema()
             entrada.delete(0, tk.END)
             entrada.focus()
-            return
+            return False
+
 
     # 6. Registrar nueva entrada
     resultado = registrar_entrada(matricula)
@@ -941,7 +972,8 @@ def mostrar_confirmacion_simple(nombre, matricula):
             "No se pudo registrar la entrada."
         )
         reiniciar_estado_sistema()
-        return
+        return False
+
 
     # 7. Ocultar ventana principal
     ventana.withdraw()
@@ -951,6 +983,8 @@ def mostrar_confirmacion_simple(nombre, matricula):
         200,
         lambda: mostrar_ventana_entrega(nombre, matricula)
     )
+    return True
+
 
 def cambiar_estado(texto, color=None):
     estado_var.set(texto)
@@ -1116,9 +1150,6 @@ def iniciar_sesion():
     if procesando_sesion:
         return
 
-    btn_entrar.config(state="normal")
-    procesando_sesion = False
-
     # 🔐 Validar términos y condiciones
     if not terminos_var.get():
         messagebox.showwarning(
@@ -1168,7 +1199,11 @@ def iniciar_sesion():
         reiniciar_estado_sistema()
         return
 
-    mostrar_confirmacion_simple(nombre, matricula)
+    resultado = mostrar_confirmacion_simple(nombre, matricula)
+
+    if resultado is False:
+        reiniciar_estado_sistema()
+
 
 def mostrar_terminos_modal():
     ventana_tc = tk.Toplevel(ventana)
