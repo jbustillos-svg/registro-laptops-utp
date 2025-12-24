@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.5"
+VERSION_SISTEMA = "v1.0.6"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -56,6 +56,13 @@ FUENTE_ENTRADA = ("Segoe UI", 14)
 FUENTE_BOTON = ("Segoe UI", 12, "bold")
 FUENTE_PEQ = ("Segoe UI", 9)
 FUENTE_PEQ_BOLD = ("Segoe UI", 9, "bold")
+
+def centrar_ventana(ventana, ancho, alto):
+    ventana.update_idletasks()
+    x = (ventana.winfo_screenwidth() // 2) - (ancho // 2)
+    y = (ventana.winfo_screenheight() // 2) - (alto // 2)
+    ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
+
 
 # --- FUNCIONES BASE (SIN CAMBIOS) ---
 def contar_usos_alumno(matricula):
@@ -613,9 +620,13 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     ventana_espera = tk.Toplevel(ventana_entrega)
     ventana_espera.title("Registrando Salida")
     ventana_espera.resizable(False, False)
-    ventana_espera.geometry("400x220")
-    ventana_espera.configure(bg=COLOR_FONDO)
     ventana_espera.attributes('-topmost', True)
+    ventana_espera.configure(bg=COLOR_FONDO)
+    ANCHO = 440
+    ALTO = 260
+    centrar_ventana(ventana_espera, ANCHO, ALTO)
+    ventana_espera.attributes('-topmost', True)
+
     
     # Centrar ventana
     ventana_espera.transient(ventana_entrega)
@@ -634,13 +645,16 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
              text="Registrando salida...",
              font=("Segoe UI", 12, "bold"),
              bg=COLOR_TARJETA).pack(pady=5)
-    
-    tk.Label(frame, 
-             text="Por favor espere mientras se guarda la información",
-             font=FUENTE_PEQ,
-             fg=COLOR_TEXTO_SECUNDARIO,
-             bg=COLOR_TARJETA,
-             wraplength=350).pack(pady=5)
+    tk.Label(
+    frame,
+    text="Por favor espere mientras se guarda la información\nIntentando conexión a internet...",
+    font=FUENTE_PEQ,
+    fg=COLOR_TEXTO_SECUNDARIO,
+    bg=COLOR_TARJETA,
+    justify="center",
+    wraplength=360
+    ).pack(pady=5)
+
     
     # Barra de progreso
     progress_frame = tk.Frame(frame, bg=COLOR_TARJETA)
@@ -669,7 +683,7 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
                 return False
                 
             if i < 5:
-                actualizar_progreso(i, f"Intentando conexión... ({i+1}/5)")
+                actualizar_progreso(i, f"Intentando conexión ({i+1}/5)…")
                 time.sleep(0.5)
             else:
                 actualizar_progreso(5, "Registrando salida...")
