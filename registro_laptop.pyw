@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.6"
+VERSION_SISTEMA = "v1.0.7"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -307,40 +307,40 @@ def mostrar_instrucciones_iniciales(matricula=""):
     )
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # Icono de información
-    tk.Label(
-        frame,
-        text="📋",
-        font=("Segoe UI", 32),
-        fg=COLOR_PRIMARIO,
-        bg=COLOR_TARJETA
-    ).pack(pady=(0, 15))
-
     tk.Label(
         frame,
         text="INSTRUCCIONES IMPORTANTES",
         font=("Segoe UI", 16, "bold"),
         fg=COLOR_TEXTO,
         bg=COLOR_TARJETA
-    ).pack(pady=(0, 20))
+    ).pack(pady=(0, 7))
 
     texto = (
-        "• Ingresa tu matrícula correctamente.\n\n"
-        "• NO cierres el sistema ni apagues la computadora manualmente.\n\n"
-        "• Al finalizar, utiliza siempre el botón:\n"
-        "  “ENTREGAR Y APAGAR”.\n\n"
-        "• El mal uso del equipo es responsabilidad del usuario."
+    "• Ingresa tu matrícula correctamente.\n"
+    "• La laptop es de uso individual y el usuario es responsable de su cuidado.\n"
+    "• NO cierres el sistema ni intentes apagar la computadora manualmente.\n"
+    "• Utiliza siempre el botón: “ENTREGAR Y APAGAR”.\n"
+    "• El mal uso del equipo o una entrega incorrecta genera NO ENTREGA.\n"
     )
 
-    tk.Label(
-        frame,
-        text=texto,
-        font=FUENTE_CUERPO,
-        fg=COLOR_TEXTO_SECUNDARIO,
-        bg=COLOR_TARJETA,
-        justify=tk.LEFT,
-        wraplength=480
-    ).pack(pady=15, fill=tk.X)
+    texto_widget = tk.Text(
+    frame,
+    font=FUENTE_CUERPO,
+    fg=COLOR_TEXTO_SECUNDARIO,
+    bg=COLOR_TARJETA,
+    wrap=tk.WORD,
+    relief=tk.FLAT,
+    height=8,        # 👈 clave
+    padx=20,
+    pady=4
+)
+    texto_widget.pack(pady=6, fill=tk.X)
+
+    texto_widget.insert(tk.END, texto)
+    texto_widget.config(state=tk.DISABLED)
+
+
+
 
     tk.Button(
         frame,
@@ -721,12 +721,23 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
 
 def entregar_y_apagar(ventana, matricula, nombre):
     """
-    Si la sesión ya fue cerrada automáticamente:
-    - Muestra aviso
-    - Apaga la laptop
-    - NO registra nada
+    Entrega correcta:
+    - Si NO hay internet → NO apagar, NO sancionar
+    - Si la sesión fue cerrada por otra laptop → aviso y apagado
+    - Si todo está bien → registrar salida normal
     """
 
+    # 🔴 1. PRIMERO validar conexión a internet
+    if not verificar_internet():
+        messagebox.showerror(
+            "Sin conexión a internet",
+            "No se pudo registrar la entrega porque no hay conexión a internet.\n\n"
+            "Conéctate a internet y vuelve a intentar.\n\n"
+            "La laptop NO se apagará."
+        )
+        return
+
+    # 🔴 2. Validar sesión activa SOLO si hay conexión
     if not sesion_activa_en_esta_laptop(matricula):
         messagebox.showwarning(
             "Sesión cerrada",
@@ -734,13 +745,13 @@ def entregar_y_apagar(ventana, matricula, nombre):
             "El uso quedó registrado como NO ENTREGA.\n\n"
             "La computadora se apagará."
         )
-
         ventana.destroy()
         os.system("shutdown /s /t 3")
         return
 
-    # Si la sesión sigue activa, flujo normal
+    # 🟢 3. Flujo normal
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
+
 
 
 
