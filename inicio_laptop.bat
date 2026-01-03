@@ -1,13 +1,15 @@
 ﻿@echo off
 
-REM === RUTA DEL SISTEMA ===
-cd /d C:\ProgramData\UTP\RegistroLaptop
+REM === MOVERSE A LA CARPETA DONDE ESTA EL .BAT ===
+cd /d "%~dp0"
 
 REM === ACTUALIZAR DESDE GITHUB ===
 git pull --quiet
 
-REM === EJECUTAR SISTEMA ===
+REM === RUTA DE PYTHONW ===
 set PYTHONW="C:\Users\javie\AppData\Local\Programs\Python\Python311\pythonw.exe"
-start "" %PYTHONW% "C:\ProgramData\UTP\RegistroLaptop\registro_laptop.pyw"
+
+REM === EJECUTAR SISTEMA ===
+start "" %PYTHONW% "registro_laptop.pyw"
 
 exit
