@@ -1,15 +1,20 @@
 ﻿@echo off
 
-REM === MOVERSE A LA CARPETA DONDE ESTA EL .BAT ===
+REM === MOVERSE A LA CARPETA DEL SISTEMA ===
 cd /d "%~dp0"
 
-REM === ACTUALIZAR DESDE GITHUB ===
+REM === ACTUALIZAR DESDE GITHUB (SI HAY INTERNET) ===
 git pull --quiet
 
-REM === RUTA DE PYTHONW ===
-set PYTHONW="C:\Users\javie\AppData\Local\Programs\Python\Python311\pythonw.exe"
+REM === BUSCAR PYTHONW AUTOMATICAMENTE ===
+where pythonw >nul 2>&1
+if errorlevel 1 (
+    echo Python no encontrado.
+    pause
+    exit
+)
 
 REM === EJECUTAR SISTEMA ===
-start "" %PYTHONW% "registro_laptop.pyw"
+start "" pythonw "registro_laptop.pyw"
 
 exit
