@@ -19,17 +19,28 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.0.8"
+VERSION_SISTEMA = "v1.1.0"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
 verificar_conexion_activo = True
-mensaje_espera = None
 procesando_sesion = False
 aviso_internet = None
-terminos_var = None
+acepta_estado_equipo = None
+chk_label = None
 
-
+# =========================
+# COLUMNAS HOJA REGISTROS (0-based)
+# =========================
+COL_MATRICULA = 0
+COL_NOMBRE = 1
+COL_FECHA = 2
+COL_HORA_INGRESO = 3
+COL_CONFIRMACION = 4
+COL_HORA_SALIDA = 5
+COL_LAPTOP_ID = 6
+COL_BATERIA_ENTRADA = 7
+COL_BATERIA_SALIDA = 8
 # =========================
 # 🎨 PALETA DE COLORES MODERNA
 # =========================
@@ -103,7 +114,8 @@ def mostrar_ventana_control_unificada(
     ventana_ctrl.grab_set()
 
     ancho = 500
-    alto = 450
+    alto = 300 if estado == "SANCIONADO" else 420
+
 
     pantalla_ancho = ventana_ctrl.winfo_screenwidth()
     pantalla_alto = ventana_ctrl.winfo_screenheight()
@@ -112,14 +124,20 @@ def mostrar_ventana_control_unificada(
 
     ventana_ctrl.geometry(f"{ancho}x{alto}+{x}+{y}")
 
-    frame = tk.Frame(ventana_ctrl, bg=COLOR_TARJETA, padx=30, pady=25)
+    frame = tk.Frame(ventana_ctrl, bg=COLOR_TARJETA)
     frame.pack(fill=tk.BOTH, expand=True)
+
+    contenido = tk.Frame(frame, bg=COLOR_TARJETA, padx=30, pady=12)
+    contenido.pack(fill=tk.X)
+
+    boton_frame = tk.Frame(frame, bg=COLOR_TARJETA, padx=40, pady=5)
+    boton_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
 
     # 🔴 USUARIO SANCIONADO
     if estado == "SANCIONADO":
         titulo = "🚫 USUARIO SANCIONADO"
         color = COLOR_ERROR
-        icono = "🚫"
         mensaje = (
             f"No entregas registradas: {no_entregas} de 4\n\n"
             "Has excedido el número permitido.\n\n"
@@ -129,15 +147,15 @@ def mostrar_ventana_control_unificada(
         # ⚠️ AVISO GENERAL
         titulo = "⚠️ AVISO IMPORTANTE"
         color = COLOR_ADVERTENCIA
-        icono = "⚠️"
 
         mensaje = (
             f"No entregas registradas: {no_entregas} de 4\n"
             f"Estado: {estado}\n\n"
             "IMPORTANTE:\n"
             "Solo se permiten 4 intentos.\n"
-            "Al superar este límite, el usuario será bloqueado.\n\n"
+            "Al superar este límite, el usuario será bloqueado."
         )
+
 
         if tiene_pendiente:
             mensaje = (
@@ -147,49 +165,49 @@ def mostrar_ventana_control_unificada(
             ) + mensaje
 
     # Icono
+
     tk.Label(
-        frame,
-        text=icono,
-        font=("Segoe UI", 28),
+        contenido,
+        text=titulo,
+        font=("Segoe UI", 16, "bold"),
         fg=color,
         bg=COLOR_TARJETA
     ).pack(pady=(0, 10))
 
     tk.Label(
-        frame,
-        text=titulo,
-        font=("Segoe UI", 16, "bold"),
-        fg=color,
-        bg=COLOR_TARJETA
-    ).pack(pady=(0, 15))
-
-    tk.Label(
-        frame,
+        contenido,
         text=mensaje,
         font=FUENTE_CUERPO,
         fg=COLOR_TEXTO,
         bg=COLOR_TARJETA,
         justify=tk.CENTER,
         wraplength=420
-    ).pack(pady=15, fill=tk.X)
+    ).pack(pady=(8, 6), fill=tk.X)
 
-    # Botón moderno
-    btn_frame = tk.Frame(frame, bg=COLOR_TARJETA)
-    btn_frame.pack(pady=20)
+
     
     tk.Button(
-        btn_frame,
-        text="ENTENDIDO",
-        font=FUENTE_BOTON,
+        boton_frame,
+        text="✔ ENTENDIDO",
+        font=("Segoe UI", 13, "bold"),   # ⬅ más equilibrado
         bg=COLOR_PRIMARIO,
         fg="white",
-        padx=30,
-        pady=10,
         bd=0,
         cursor="hand2",
         activebackground=COLOR_SECUNDARIO,
+        activeforeground="white",
+        relief="flat",
         command=ventana_ctrl.destroy
-    ).pack()
+    ).pack(
+        fill=tk.X,
+        padx=90,        # ⬅ más angosto
+        pady=(8, 5),
+        ipady=6         # ⬅ altura fina y controlada
+    )
+
+
+
+
 
     # ⏸️ ESPERAR a que el usuario cierre la ventana
     ventana_ctrl.wait_window()
@@ -209,12 +227,12 @@ def incrementar_no_entregas(matricula):
 
         fila = matriculas.index(matricula) + 1
 
-        # Columna C = No_Entregas
-        no_entregas_actual = hoja_alumnos.cell(fila, 3).value
+        # Columna E = No_Entregas
+        no_entregas_actual = hoja_alumnos.cell(fila, 5).value
         no_entregas_actual = int(no_entregas_actual) if no_entregas_actual else 0
 
         no_entregas_nuevo = no_entregas_actual + 1
-        hoja_alumnos.update_cell(fila, 3, no_entregas_nuevo)
+        hoja_alumnos.update_cell(fila, 5, no_entregas_nuevo)
 
         # ⚠️ NO TOCAR columna del estado (tiene fórmula)
         return no_entregas_nuevo, "CALCULADO_POR_FORMULA"
@@ -238,11 +256,13 @@ def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
         for i in reversed(range(len(registros))):
             fila = registros[i]
 
-            if fila[0] == matricula:
-                if fila[4].strip() == "":
-                    hoja_registros.update_cell(i + 1, 5, hora_actual)
+            if fila[COL_MATRICULA] == matricula:
+                if fila[COL_HORA_SALIDA].strip() == "":
+                    hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora_actual)
                     hoja_registros.update_cell(
-                        i + 1, 8, "CIERRE_AUTOMATICO_POR_NUEVA_SESION"
+                        i + 1,
+                        COL_BATERIA_SALIDA + 1,
+                        "CIERRE_AUTOMATICO_POR_NUEVA_SESION"
                     )
 
                     incrementar_no_entregas(matricula)
@@ -268,8 +288,8 @@ def obtener_control_alumno(matricula):
         if matricula in matriculas:
             fila = matriculas.index(matricula) + 1
 
-            no_entregas = hoja_alumnos.cell(fila, 3).value
-            estado = hoja_alumnos.cell(fila, 5).value
+            no_entregas = hoja_alumnos.cell(fila, 5).value
+            estado = hoja_alumnos.cell(fila, 7).value
 
             no_entregas = int(no_entregas) if no_entregas else 0
             estado = estado if estado else "ACTIVO"
@@ -316,11 +336,11 @@ def mostrar_instrucciones_iniciales(matricula=""):
     ).pack(pady=(0, 7))
 
     texto = (
-    "• Ingresa tu matrícula correctamente.\n"
-    "• La laptop es de uso individual y el usuario es responsable de su cuidado.\n"
-    "• NO cierres el sistema ni intentes apagar la computadora manualmente.\n"
-    "• Utiliza siempre el botón: “ENTREGAR Y APAGAR”.\n"
-    "• El mal uso del equipo o una entrega incorrecta genera NO ENTREGA.\n"
+    "• La laptop es responsabilidad del alumno durante su uso.\n"
+    "• Cualquier daño o falla debe reportarse de inmediato.\n"
+    "• NO cierres el sistema ni apagues la computadora manualmente.\n"
+    "• Siempre usa el botón “ENTREGAR Y APAGAR”.\n"
+    "• No entregar la laptop genera NO ENTREGA y posibles sanciones.\n"
     )
 
     texto_widget = tk.Text(
@@ -421,7 +441,7 @@ def conectar_google_sheets():
         return False
 
 def verificar_conexion_periodicamente():
-    global verificar_conexion_activo, mensaje_espera, aviso_internet
+    global verificar_conexion_activo, aviso_internet
     
     while verificar_conexion_activo:
         if verificar_internet():
@@ -431,9 +451,7 @@ def verificar_conexion_periodicamente():
                     if aviso_internet and aviso_internet.winfo_exists():
                         aviso_internet.destroy()
                         aviso_internet = None
-                    if mensaje_espera:
-                        mensaje_espera.destroy()
-                        mensaje_espera = None
+                    
             else:
                 cambiar_estado("🟢 Conectado", COLOR_EXITO)
         else:
@@ -479,29 +497,156 @@ def buscar_nombre(matricula):
         return None
     return None
 
+def buscar_rol(matricula):
+    """
+    Obtiene el rol del usuario desde Google Sheets
+    Columna C
+    """
+    try:
+        if hoja_alumnos is None:
+            return "ALUMNO"
+
+        celdas = hoja_alumnos.col_values(1)
+        if matricula in celdas:
+            row = celdas.index(matricula) + 1
+            rol = hoja_alumnos.cell(row, 3).value
+            return rol.strip().upper() if rol else "ALUMNO"
+    except Exception as e:
+        print(f"Error al buscar rol: {e}")
+        return "ALUMNO"
+
+
+def buscar_curp(matricula):
+    """
+    Obtiene la CURP completa desde Google Sheets
+    Columna D
+    """
+    try:
+        if hoja_alumnos is None:
+            return None
+
+        celdas = hoja_alumnos.col_values(1)
+        if matricula in celdas:
+            row = celdas.index(matricula) + 1
+            return hoja_alumnos.cell(row, 4).value
+    except Exception as e:
+        print(f"Error al buscar CURP: {e}")
+        return None
+
+
+def validar_curp_ultimos_2(curp_real, curp_ingresada):
+    if not curp_real or len(curp_real) < 2:
+        return False
+    return curp_real[-2:] == curp_ingresada.strip()
+
+def pedir_curp_ultimos_2(parent):
+    ventana_curp = tk.Toplevel(parent)
+
+    ventana_curp.transient(parent)
+    ventana_curp.attributes("-topmost", True)
+    ventana_curp.grab_set()
+    ventana_curp.focus_force()
+    ventana_curp.lift()
+
+    ventana_curp.title("Validación de identidad")
+    ventana_curp.resizable(False, False)
+
+    ancho, alto = 360, 220
+    x = (ventana_curp.winfo_screenwidth() - ancho) // 2
+    y = (ventana_curp.winfo_screenheight() - alto) // 2
+    ventana_curp.geometry(f"{ancho}x{alto}+{x}+{y}")
+
+    tk.Label(
+        ventana_curp,
+        text="Por seguridad, ingresa los\nÚLTIMOS 2 DÍGITOS de tu CURP",
+        font=("Segoe UI", 11),
+        justify="center"
+    ).pack(pady=20)
+
+    resultado = {"valor": None}
+
+    # 🔑 VARIABLE CONTROLADA
+    curp_var = tk.StringVar()
+
+    def controlar_texto(*args):
+        valor = curp_var.get().upper()
+
+        # Limitar a 2 caracteres
+        if len(valor) > 2:
+            valor = valor[:2]
+
+        # Evitar loop infinito
+        if curp_var.get() != valor:
+            curp_var.set(valor)
+
+    # 🔗 Vincular control
+    curp_var.trace_add("write", controlar_texto)
+
+    entrada = tk.Entry(
+        ventana_curp,
+        textvariable=curp_var,
+        font=("Segoe UI", 16),
+        justify="center",
+        width=8,      # 👈 alargado, no gigante
+    )
+    entrada.pack(pady=10, ipady=6)
+    entrada.focus()
+
+    def confirmar(event=None):
+        valor = curp_var.get().strip()
+
+        if len(valor) != 2:
+            messagebox.showerror(
+                "Dato inválido",
+                "Debes ingresar exactamente 2 caracteres.",
+                parent=ventana_curp
+            )
+            return
+
+        resultado["valor"] = valor
+        ventana_curp.attributes("-topmost", False)
+        ventana_curp.destroy()
+
+    entrada.bind("<Return>", confirmar)
+
+    tk.Button(
+        ventana_curp,
+        text="VALIDAR",
+        font=FUENTE_BOTON,
+        bg=COLOR_EXITO,
+        fg="white",
+        bd=0,
+        padx=25,
+        pady=10,
+        command=confirmar
+    ).pack(pady=20)
+
+    ventana_curp.wait_window()
+    return resultado["valor"]
+
 def verificar_entrega_pendiente(matricula):
     try:
         if hoja_registros is None:
             return False, None, None
-            
+
         registros = hoja_registros.get_all_values()
+
         for i in reversed(range(len(registros))):
-            if registros[i][0] == matricula:
-                hora_salida = registros[i][4].strip()
+            if registros[i][COL_MATRICULA] == matricula:
+                hora_salida = registros[i][COL_HORA_SALIDA].strip()
                 if hora_salida == "":
-                    fecha_entrada = registros[i][2]
-                    laptop_id = registros[i][5] if len(registros[i]) > 5 else "N/A"
+                    fecha_entrada = registros[i][COL_FECHA]
+                    laptop_id = registros[i][COL_LAPTOP_ID]
                     return True, fecha_entrada, laptop_id
-                break
+                break  # 👈 SOLO cuando ya encontró la matrícula
+
     except Exception as e:
         print(f"Error al verificar entrega pendiente: {e}")
+
     return False, None, None
 
+
 def procesar_no_entrega_si_corresponde(matricula):
-    """
-    Incrementa No_Entregas SOLO UNA VEZ si hay
-    una entrega pendiente no procesada.
-    """
     try:
         if hoja_registros is None or hoja_alumnos is None:
             return
@@ -511,18 +656,23 @@ def procesar_no_entrega_si_corresponde(matricula):
         for i in reversed(range(len(registros))):
             fila = registros[i]
 
-            if fila[0] == matricula:
-                hora_salida = fila[4].strip()
-                observacion = fila[7].strip() if len(fila) > 7 else ""
+            if fila[COL_MATRICULA] == matricula:
+                hora_salida = fila[COL_HORA_SALIDA].strip()
+                confirmacion = fila[COL_CONFIRMACION].strip()
 
-                # Entrega pendiente NO contada
-                if hora_salida == "" and observacion != "NO_ENTREGA_CONTADA":
+                # 🔥 NO ENTREGA: confirmo entrada pero nunca entregó
+                if hora_salida == "" and confirmacion == "CONFIRMADO":
                     incrementar_no_entregas(matricula)
-                    hoja_registros.update_cell(i + 1, 8, "NO_ENTREGA_CONTADA")
+                    hoja_registros.update_cell(
+                        i + 1,
+                        COL_BATERIA_SALIDA + 1,
+                        "NO_ENTREGA_CONTADA"
+                    )
                 break
 
     except Exception as e:
         print(f"Error al procesar no entrega: {e}")
+
 
         
 def sesion_activa_en_esta_laptop(matricula):
@@ -538,8 +688,9 @@ def sesion_activa_en_esta_laptop(matricula):
         registros = hoja_registros.get_all_values()
 
         for fila in reversed(registros):
-            if fila[0] == matricula and fila[5] == laptop_actual:
-                return fila[4].strip() == ""
+            if fila[COL_MATRICULA] == matricula and fila[COL_LAPTOP_ID] == laptop_actual:
+              return fila[COL_HORA_SALIDA].strip() == ""
+
             break
 
     except Exception as e:
@@ -553,27 +704,30 @@ def registrar_entrada(matricula):
     try:
         if hoja_registros is None:
             return None
-            
+
         nombre = buscar_nombre(matricula)
         if nombre:
             hora, fecha = obtener_hora_internet()
             laptop_id = socket.gethostname()
             bateria_entrada = obtener_porcentaje_bateria()
-            
+
             hoja_registros.append_row([
-                matricula, 
-                nombre, 
-                fecha, 
-                hora, 
-                "",
-                laptop_id, 
-                bateria_entrada, 
-                ""
+                matricula,          # A
+                nombre,             # B
+                fecha,              # C
+                hora,               # D
+                "CONFIRMADO",       # E  ← AQUÍ
+                "",                 # F Hora_Salida
+                laptop_id,          # G
+                bateria_entrada,    # H
+                ""                  # I Bateria_Salida
             ])
+
             return nombre
     except Exception as e:
         print(f"Error al registrar entrada: {e}")
     return None
+
 
 def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
     laptop_actual = socket.gethostname()
@@ -597,12 +751,13 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
                 fila = registros[i]
 
                 if (
-                    fila[0] == matricula and
-                    fila[4] == "" and
-                    fila[5] == laptop_actual
+                    fila[COL_MATRICULA] == matricula and
+                    fila[COL_HORA_SALIDA] == "" and
+                    fila[COL_LAPTOP_ID] == laptop_actual
                 ):
-                    hoja_registros.update_cell(i + 1, 5, hora)
-                    hoja_registros.update_cell(i + 1, 8, bateria_salida)
+                    hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
+                    hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
+
                     return True
 
             return False
@@ -785,13 +940,6 @@ def mostrar_ventana_entrega(nombre, matricula):
         lbl_logo.image = logo_entrega
         lbl_logo.pack(pady=(0, 20))
 
-    # Icono de laptop
-    tk.Label(
-        frame_principal,
-        text="💻",
-        font=("Segoe UI", 28),
-        bg=COLOR_TARJETA
-    ).pack(pady=(0, 10))
 
     tk.Label(
         frame_principal,
@@ -803,11 +951,14 @@ def mostrar_ventana_entrega(nombre, matricula):
 
     tk.Label(
         frame_principal,
-        text=f"Bienvenid@, {nombre}",
+        text=f"Bienvenid@,\n{nombre}",
         font=("Segoe UI", 16, "bold"),
         fg=COLOR_EXITO,
-        bg=COLOR_TARJETA
+        bg=COLOR_TARJETA,
+        justify="center",
+        wraplength=340
     ).pack(pady=(0, 25))
+
 
     # Botón principal
     tk.Button(
@@ -832,18 +983,7 @@ def mostrar_ventana_entrega(nombre, matricula):
         bg=COLOR_TARJETA
     ).pack(pady=(10, 0))
 
-    # Información adicional
-    info_frame = tk.Frame(frame_principal, bg=COLOR_FONDO, padx=15, pady=10)
-    info_frame.pack(pady=20, fill=tk.X)
-    
-    hora, fecha = obtener_hora_internet()
-    tk.Label(
-        info_frame,
-        text=f"📅 {fecha} | 🕒 {hora}",
-        font=FUENTE_PEQ,
-        fg=COLOR_TEXTO_SECUNDARIO,
-        bg=COLOR_FONDO
-    ).pack()
+
 
     # Centrar ventana
     ancho, alto = 420, 480
@@ -891,8 +1031,9 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
 
         for fila in reversed(registros):
             if fila[0] == matricula:
-                hora_salida = fila[4].strip()
-                laptop_registro = fila[5]
+                hora_salida = fila[COL_HORA_SALIDA].strip()
+                laptop_registro = fila[COL_LAPTOP_ID]
+
 
                 if hora_salida == "" and laptop_registro != laptop_actual:
                     return True, laptop_registro
@@ -958,6 +1099,35 @@ def mostrar_confirmacion_simple(nombre, matricula):
             reiniciar_estado_sistema()
             return False
 
+    # 🔐 VALIDAR ROL
+    rol = buscar_rol(matricula)
+
+    # 🔒 VALIDACIÓN POR CURP SOLO PARA ALUMNOS
+    if rol == "ALUMNO":
+
+        curp_real = buscar_curp(matricula)
+
+        if not curp_real:
+            messagebox.showerror(
+                "Error",
+                "No se pudo validar la identidad.\nContacta al administrador."
+            )
+            reiniciar_estado_sistema()
+            return False
+
+        curp_ingresada = pedir_curp_ultimos_2(ventana)
+
+        if not curp_ingresada:
+            reiniciar_estado_sistema()
+            return False
+
+        if not validar_curp_ultimos_2(curp_real, curp_ingresada):
+            messagebox.showerror(
+                "Acceso denegado",
+                "Los datos no coinciden.\n\nSesión cancelada."
+            )
+            reiniciar_estado_sistema()
+            return False
 
 
     # 2. 🔥 CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
@@ -1038,6 +1208,14 @@ def reiniciar_estado_sistema():
         cambiar_estado("🟢 Conectado", COLOR_EXITO)
     else:
         cambiar_estado("🔴 Sin conexión", COLOR_ERROR)
+        if acepta_estado_equipo:
+            acepta_estado_equipo.set(False)
+            try:
+                chk_label.config(text="⬜ ")
+            except:
+                pass
+
+
 
 def mostrar_aviso_internet_bloqueante():
     """Muestra un aviso emergente bloqueante que no se puede mover, cerrar ni minimizar"""
@@ -1175,13 +1353,6 @@ def iniciar_sesion():
     if procesando_sesion:
         return
 
-    # 🔐 Validar términos y condiciones
-    if not terminos_var.get():
-        messagebox.showwarning(
-            "Términos y Condiciones",
-            "Debes aceptar los Términos y Condiciones para continuar."
-        )
-        return
 
     procesando_sesion = True
     btn_entrar.config(state="disabled")
@@ -1195,6 +1366,15 @@ def iniciar_sesion():
         entrada.focus()
         reiniciar_estado_sistema()
         return
+        # 🔒 Validar aceptación de estado del equipo
+    if not acepta_estado_equipo.get():
+        messagebox.showwarning(
+            "Confirmación requerida",
+            "Debes confirmar el estado de la laptop para continuar."
+        )
+        reiniciar_estado_sistema()
+        return
+
 
     if not verificar_internet():
         messagebox.showerror(
@@ -1230,88 +1410,10 @@ def iniciar_sesion():
         reiniciar_estado_sistema()
 
 
-def mostrar_terminos_modal():
-    ventana_tc = tk.Toplevel(ventana)
-    ventana_tc.title("Términos y Condiciones")
-    ventana_tc.configure(bg=COLOR_FONDO)
-
-    ventana_tc.transient(ventana)
-    ventana_tc.grab_set()
-    ventana_tc.focus_force()
-
-    ancho, alto = 900, 600
-    x = (ventana_tc.winfo_screenwidth() - ancho) // 2
-    y = (ventana_tc.winfo_screenheight() - alto) // 2
-    ventana_tc.geometry(f"{ancho}x{alto}+{x}+{y}")
-
-    # ===== GRID PRINCIPAL =====
-    ventana_tc.rowconfigure(0, weight=1)
-    ventana_tc.columnconfigure(0, weight=1)
-
-    contenedor = tk.Frame(ventana_tc, bg=COLOR_TARJETA)
-    contenedor.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-
-    contenedor.rowconfigure(1, weight=1)
-    contenedor.columnconfigure(0, weight=1)
-
-    # ===== TÍTULO =====
-    tk.Label(
-        contenedor,
-        text="TÉRMINOS Y CONDICIONES DE USO DEL SERVICIO",
-        font=("Segoe UI", 16, "bold"),
-        bg=COLOR_TARJETA,
-        fg=COLOR_TEXTO
-    ).grid(row=0, column=0, pady=(0, 15))
-
-    # ===== ÁREA DE TEXTO =====
-    frame_texto = tk.Frame(contenedor, bg=COLOR_TARJETA)
-    frame_texto.grid(row=1, column=0, sticky="nsew")
-
-    frame_texto.rowconfigure(0, weight=1)
-    frame_texto.columnconfigure(0, weight=1)
-
-    texto = tk.Text(
-        frame_texto,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        bg="#f9f9f9",
-        fg=COLOR_TEXTO,
-        padx=60,
-        pady=25,
-        relief=tk.FLAT
-    )
-    texto.grid(row=0, column=0, sticky="nsew")
-
-    scrollbar = tk.Scrollbar(frame_texto, command=texto.yview)
-    scrollbar.grid(row=0, column=1, sticky="ns")
-    texto.config(yscrollcommand=scrollbar.set)
-
-    # ===== CARGAR ARCHIVO TXT =====
-    try:
-        with open("terminos_condiciones.txt", "r", encoding="utf-8") as f:
-            texto.insert(tk.END, f.read())
-    except:
-        texto.insert(tk.END, "No se pudieron cargar los Términos y Condiciones.")
-
-    texto.config(state=tk.DISABLED)
-
-    # ===== BOTÓN CERRAR =====
-    tk.Button(
-        contenedor,
-        text="CERRAR",
-        font=FUENTE_BOTON,
-        bg=COLOR_PRIMARIO,
-        fg="white",
-        bd=0,
-        padx=30,
-        pady=12,
-        cursor="hand2",
-        command=ventana_tc.destroy
-    ).grid(row=2, column=0, pady=(15, 0))
 
 
 def crear_pantalla_login():
-    global entrada, btn_entrar, estado_var, estado_label, terminos_var
+    global entrada, btn_entrar, estado_var, estado_label, chk_label
 
     for widget in ventana.winfo_children():
         widget.destroy()
@@ -1330,7 +1432,7 @@ def crear_pantalla_login():
         main_container,
         bg=COLOR_TARJETA,
         width=460,
-        height=640,
+        height=620,
         highlightthickness=1,
         highlightbackground=COLOR_BORDE
     )
@@ -1382,39 +1484,70 @@ def crear_pantalla_login():
         highlightbackground=COLOR_BORDE,
         highlightcolor=COLOR_PRIMARIO
     )
-    entrada.pack(fill=tk.X, ipady=12)
+    entrada.pack(fill=tk.X, ipady=12, pady=(0, 18))
     entrada.focus()
 
+        # =========================
+        # CONFIRMACIÓN ESTADO LAPTOP
+        # =========================
+    global acepta_estado_equipo
+    acepta_estado_equipo = tk.BooleanVar(value=False)
+
+    check_frame = tk.Frame(card, bg=COLOR_TARJETA)
+    check_frame.pack(padx=50, pady=(0, 25), fill=tk.X)
+
+        # Checkbutton con emoji que cambia
+    def update_check_emoji():
+            if acepta_estado_equipo.get():
+                chk_label.config(text="✅ ")
+            else:
+                chk_label.config(text="⬜ ")
+        
+        # Frame para alinear checkbox y texto
+    check_content = tk.Frame(check_frame, bg=COLOR_TARJETA)
+    check_content.pack(anchor="w")
+
+        # Label con emoji (hace las veces de checkbox)
+    chk_label = tk.Label(
+            check_content,
+            text="⬜ ",
+            font=("Segoe UI", 14),
+            fg=COLOR_PRIMARIO,
+            bg=COLOR_TARJETA,
+            cursor="hand2"
+        )
+    chk_label.pack(side=tk.LEFT, padx=(0, 10))
+    update_check_emoji()
+
+        # Texto del checkbox
+    chk_text = tk.Label(
+            check_content,
+            text="Confirmo que la laptop está en buen estado\n" +
+                 "o ya reporté cualquier anomalía.",
+            font=("Segoe UI", 10),
+            fg=COLOR_TEXTO,
+            bg=COLOR_TARJETA,
+            justify="left",
+            cursor="hand2",
+            wraplength=300
+        )
+    chk_text.pack(side=tk.LEFT)
+
+        # Hacer ambos elementos clickeables
+    def toggle_check(event=None):
+            acepta_estado_equipo.set(not acepta_estado_equipo.get())
+            update_check_emoji()
+
+    chk_label.bind("<Button-1>", toggle_check)
+    chk_text.bind("<Button-1>", toggle_check)
+
+        # Línea divisoria
+    tk.Frame(check_frame, height=1, bg=COLOR_BORDE).pack(fill=tk.X, pady=(15, 0))
+
+  
     entrada.bind("<KeyRelease>", forzar_mayusculas)
     entrada.bind("<Return>", lambda e: iniciar_sesion())
 
-    # =========================
-    # TÉRMINOS Y CONDICIONES
-    # =========================
-    terminos_var = tk.BooleanVar(value=False)
-
-    terminos_frame = tk.Frame(card, bg=COLOR_TARJETA)
-    terminos_frame.pack(padx=50, pady=(20, 25), anchor="w")
-
-    tk.Checkbutton(
-        terminos_frame,
-        text="Acepto los ",
-        variable=terminos_var,
-        font=("Segoe UI", 12),
-        bg=COLOR_TARJETA,
-        activebackground=COLOR_TARJETA
-    ).pack(side=tk.LEFT)
-
-    link = tk.Label(
-        terminos_frame,
-        text="Términos y Condiciones",
-        font=("Segoe UI", 12, "underline"),
-        fg=COLOR_PRIMARIO,
-        bg=COLOR_TARJETA,
-        cursor="hand2"
-    )
-    link.pack(side=tk.LEFT)
-    link.bind("<Button-1>", lambda e: mostrar_terminos_modal())
 
     # =========================
     # BOTÓN INGRESAR
@@ -1448,7 +1581,7 @@ def crear_pantalla_login():
     estado_label.pack(pady=(5, 10))
 
     # =========================
-    # VERSIÓN (ESQUINA)
+    # VERSIÓN (ABAJO DEL TODO)
     # =========================
     tk.Label(
         card,
@@ -1456,10 +1589,7 @@ def crear_pantalla_login():
         font=("Segoe UI", 9),
         fg=COLOR_TEXTO_SECUNDARIO,
         bg=COLOR_TARJETA
-    ).place(relx=0.98, rely=0.98, anchor="se")
-
-
-
+    ).pack(side=tk.BOTTOM, anchor="e", padx=12, pady=(5, 8))
 
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
