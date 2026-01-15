@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.0"
+VERSION_SISTEMA = "v1.1.1"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -674,12 +674,7 @@ def procesar_no_entrega_si_corresponde(matricula):
         print(f"Error al procesar no entrega: {e}")
 
 
-        
 def sesion_activa_en_esta_laptop(matricula):
-    """
-    Verifica si la sesión de la matrícula
-    sigue activa en ESTA laptop.
-    """
     try:
         if hoja_registros is None:
             return False
@@ -688,15 +683,17 @@ def sesion_activa_en_esta_laptop(matricula):
         registros = hoja_registros.get_all_values()
 
         for fila in reversed(registros):
-            if fila[COL_MATRICULA] == matricula and fila[COL_LAPTOP_ID] == laptop_actual:
-              return fila[COL_HORA_SALIDA].strip() == ""
-
-            break
+            if fila[COL_MATRICULA] == matricula:
+                return (
+                    fila[COL_LAPTOP_ID] == laptop_actual and
+                    fila[COL_HORA_SALIDA].strip() == ""
+                )
 
     except Exception as e:
         print(f"Error al validar sesión activa local: {e}")
 
     return False
+
 
 
 
