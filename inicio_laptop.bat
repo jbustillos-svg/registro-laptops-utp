@@ -1,20 +1,9 @@
 ﻿@echo off
-
-REM === MOVERSE A LA CARPETA DEL SISTEMA ===
 cd /d "%~dp0"
 
-REM === ACTUALIZAR DESDE GITHUB (SI HAY INTERNET) ===
-git pull --quiet
+echo ==== INICIO %DATE% %TIME% ==== >> update.log
 
-REM === BUSCAR PYTHONW AUTOMATICAMENTE ===
-where pythonw >nul 2>&1
-if errorlevel 1 (
-    echo Python no encontrado.
-    pause
-    exit
-)
+git pull origin main >> update.log 2>&1
 
-REM === EJECUTAR SISTEMA ===
 start "" pythonw "registro_laptop.pyw"
 
-exit
