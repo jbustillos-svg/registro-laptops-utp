@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.2"
+VERSION_SISTEMA = "v1.1.3"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -875,11 +875,10 @@ def entregar_y_apagar(ventana, matricula, nombre):
     """
     Entrega correcta:
     - Si NO hay internet → NO apagar, NO sancionar
-    - Si la sesión fue cerrada por otra laptop → aviso y apagado
-    - Si todo está bien → registrar salida normal
+    - SIEMPRE intentar registrar salida
     """
 
-    # 🔴 1. PRIMERO validar conexión a internet
+    # 🔴 Validar conexión a internet
     if not verificar_internet():
         messagebox.showerror(
             "Sin conexión a internet",
@@ -889,23 +888,8 @@ def entregar_y_apagar(ventana, matricula, nombre):
         )
         return
 
-    # 🔴 2. Validar sesión activa SOLO si hay conexión
-    if not sesion_activa_en_esta_laptop(matricula):
-        messagebox.showwarning(
-            "Sesión cerrada",
-            "Esta sesión ya fue cerrada automáticamente.\n\n"
-            "El uso quedó registrado como NO ENTREGA.\n\n"
-            "La computadora se apagará."
-        )
-        ventana.destroy()
-        os.system("shutdown /s /t 3")
-        return
-
-    # 🟢 3. Flujo normal
+    # 🟢 SIEMPRE intentar registrar salida
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
-
-
-
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
