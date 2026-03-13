@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.3"
+VERSION_SISTEMA = "v1.1.4"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -413,10 +413,11 @@ def cargar_logo(ruta_imagen, ancho, alto):
 
 def verificar_internet():
     try:
-        requests.get("http://www.google.com", timeout=3)
+        requests.get("https://clients3.google.com/generate_204", timeout=3)
         return True
     except:
         return False
+
 
 def conectar_google_sheets():
     global hoja_alumnos, hoja_registros
@@ -727,10 +728,12 @@ def registrar_entrada(matricula):
 
 
 def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
+
     laptop_actual = socket.gethostname()
 
     for intento in range(max_reintentos):
         try:
+
             if not verificar_internet():
                 time.sleep(2)
                 continue
@@ -742,16 +745,18 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
             hora, _ = obtener_hora_internet()
             bateria_salida = obtener_porcentaje_bateria()
-            registros = hoja_registros.get_all_values()
 
-            for i in reversed(range(len(registros))):
-                fila = registros[i]
+            matriculas = hoja_registros.col_values(1)
+            horas_salida = hoja_registros.col_values(6)
+            laptops = hoja_registros.col_values(7)
 
-                if (
-                    fila[COL_MATRICULA] == matricula and
-                    fila[COL_HORA_SALIDA] == "" and
-                    fila[COL_LAPTOP_ID] == laptop_actual
-                ):
+            for i in reversed(range(len(matriculas))):
+
+                if matriculas[i] == matricula and laptops[i] == laptop_actual:
+
+                    if horas_salida[i].strip() != "":
+                        return True
+
                     hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                     hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
 
@@ -1603,6 +1608,6 @@ else:
     threading.Thread(target=conectar_google_sheets, daemon=True).start()
 
 threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
-ventana.after(1200, mostrar_instrucciones_iniciales, "")
+#ventana.after(1200, mostrar_instrucciones_iniciales, "")
 
 ventana.mainloop()
