@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.6"
+VERSION_SISTEMA = "v1.1.7"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -907,37 +907,64 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     
     return ventana_espera
 
-
 def entregar_y_apagar(ventana, matricula, nombre):
     """
-    Entrega correcta:
-    - Si NO hay internet → NO apagar, NO sancionar
-    - SOLO permite entrega si la sesión pertenece a esta laptop
-    - SIEMPRE intentar registrar salida si es válida
+    Maneja entrega correctamente incluso si ya fue registrada
     """
 
-    # 🔴 Validar conexión a internet
+    # 🔴 Validar conexión
     if not verificar_internet():
         messagebox.showerror(
             "Sin conexión a internet",
-            "No se pudo registrar la entrega porque no hay conexión a internet.\n\n"
-            "Conéctate a internet y vuelve a intentar.\n\n"
-            "La laptop NO se apagará."
+            "No hay conexión.\n\nLa laptop NO se apagará."
         )
         return
 
-    # 🔒 Validar que la sesión pertenece a esta laptop
-    if not sesion_activa_en_esta_laptop(matricula):
-        messagebox.showerror(
-            "Error",
-            "Esta sesión no pertenece a esta laptop.\n\n"
-            "No es posible realizar la entrega desde este equipo."
-        )
-        return
+    laptop_actual = socket.gethostname()
+    registros = hoja_registros.get_all_values()
 
-    # 🟢 SI TODO ESTÁ BIEN → intentar registrar salida
-    mostrar_ventana_espera_registro(ventana, matricula, nombre)
+    # 🔍 Buscar última sesión
+    for fila in reversed(registros):
+        if fila[COL_MATRICULA] == matricula:
 
+            hora_salida = fila[COL_HORA_SALIDA].strip()
+            laptop_registro = fila[COL_LAPTOP_ID]
+
+            # ✅ CASO 1: ya se registró salida en esta laptop
+            if laptop_registro == laptop_actual and hora_salida != "":
+                print("ℹ️ La salida ya estaba registrada en esta laptop")
+
+                messagebox.showinfo(
+                    "Entrega ya registrada",
+                    "La salida ya fue registrada correctamente.\n\n"
+                    "La laptop se apagará."
+                )
+
+                ventana.destroy()
+                os.system("shutdown /s /t 3")
+                return
+
+            # ✅ CASO 2: sesión activa correcta
+            if laptop_registro == laptop_actual and hora_salida == "":
+                mostrar_ventana_espera_registro(ventana, matricula, nombre)
+                return
+
+            # 🚫 CASO 3: otra laptop
+            if hora_salida == "" and laptop_registro != laptop_actual:
+                messagebox.showerror(
+                    "Error",
+                    "Esta sesión pertenece a otra laptop.\n\n"
+                    "No puedes entregarla desde este equipo."
+                )
+                return
+
+            break
+
+    # ❌ No encontró nada
+    messagebox.showerror(
+        "Error",
+        "No se encontró una sesión válida."
+    )
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
