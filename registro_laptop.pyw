@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.5"
+VERSION_SISTEMA = "v1.1.6"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -772,7 +772,7 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
                     hora_salida = fila[COL_HORA_SALIDA].strip()
                     laptop_registro = fila[COL_LAPTOP_ID]
 
-                    # ✅ Caso ideal (misma laptop)
+                    # ✅ SOLO MI LAPTOP puede cerrar SU sesión
                     if laptop_registro == laptop_actual and hora_salida == "":
                         print("✔️ Sesión encontrada en esta laptop")
 
@@ -781,16 +781,12 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
                         return True
 
-                    # 🔁 Fallback (otra laptop)
-                    if hora_salida == "":
-                        print(f"⚠️ Sesión activa en otra laptop: {laptop_registro}")
+                    # 🚫 Si es de otra laptop → NO tocar
+                    if hora_salida == "" and laptop_registro != laptop_actual:
+                        print(f"🚫 Sesión pertenece a otra laptop: {laptop_registro}")
+                        return False
 
-                        hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
-                        hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
-
-                        return True
-
-                    # ❌ Ya estaba cerrada
+                    # ℹ️ Ya estaba cerrada
                     print("ℹ️ La sesión ya tenía hora de salida")
                     return False
 
@@ -911,11 +907,13 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     
     return ventana_espera
 
+
 def entregar_y_apagar(ventana, matricula, nombre):
     """
     Entrega correcta:
     - Si NO hay internet → NO apagar, NO sancionar
-    - SIEMPRE intentar registrar salida
+    - SOLO permite entrega si la sesión pertenece a esta laptop
+    - SIEMPRE intentar registrar salida si es válida
     """
 
     # 🔴 Validar conexión a internet
@@ -928,8 +926,18 @@ def entregar_y_apagar(ventana, matricula, nombre):
         )
         return
 
-    # 🟢 SIEMPRE intentar registrar salida
+    # 🔒 Validar que la sesión pertenece a esta laptop
+    if not sesion_activa_en_esta_laptop(matricula):
+        messagebox.showerror(
+            "Error",
+            "Esta sesión no pertenece a esta laptop.\n\n"
+            "No es posible realizar la entrega desde este equipo."
+        )
+        return
+
+    # 🟢 SI TODO ESTÁ BIEN → intentar registrar salida
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
+
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
