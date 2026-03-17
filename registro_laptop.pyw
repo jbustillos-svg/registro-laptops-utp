@@ -754,37 +754,29 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
                 if matriculas[i] == matricula:
 
-                    # ✅ caso ideal
                     if (
                         laptops[i] == laptop_actual and
                         horas_salida[i].strip() == ""
                     ):
-                        print("✔️ Sesión encontrada en esta laptop")
-
                         hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                         hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
-
                         return True
 
-                    # 🔁 fallback
                     if horas_salida[i].strip() == "":
-                        print(f"⚠️ Sesión activa en otra laptop: {laptops[i]}")
-
                         hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                         hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
-
                         return True   
 
-            # 👇 SI NO ENCUENTRA NADA
-            print("⚠️ No se encontró sesión activa para cerrar")
-            return False
-            
+            print(f"⚠️ Intento {intento+1}: no se encontró sesión activa")
+            time.sleep(1)
+            continue
+
         except Exception as e:
             print(f"Error intento {intento + 1}: {e}")
             time.sleep(2)
+            print("❌ No se pudo registrar salida después de varios intentos")
 
     return False
-
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     """Muestra ventana de espera mientras se intenta registrar la salida"""
