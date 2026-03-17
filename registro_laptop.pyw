@@ -1,4 +1,4 @@
-﻿import tkinter as tk
+﻿  import tkinter as tk
 from tkinter import messagebox
 import threading
 import gspread
@@ -752,18 +752,21 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
             for i in reversed(range(len(matriculas))):
 
-                if matriculas[i] == matricula and laptops[i] == laptop_actual:
-
-                    if horas_salida[i].strip() != "":
-                        return True
+                if (
+                    matriculas[i] == matricula and
+                    laptops[i] == laptop_actual and
+                    horas_salida[i].strip() == ""
+                ):
 
                     hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                     hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
 
                     return True
 
+            # 👇 SI NO ENCUENTRA NADA
+            print("⚠️ No se encontró sesión activa para cerrar")
             return False
-
+            
         except Exception as e:
             print(f"Error intento {intento + 1}: {e}")
             time.sleep(2)
