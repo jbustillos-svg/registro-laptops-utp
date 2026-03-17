@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.4"
+VERSION_SISTEMA = "v1.1.5"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -714,16 +714,20 @@ def registrar_entrada(matricula):
                 nombre,             # B
                 fecha,              # C
                 hora,               # D
-                "CONFIRMADO",       # E  ← AQUÍ
+                "CONFIRMADO",       # E
                 "",                 # F Hora_Salida
                 laptop_id,          # G
                 bateria_entrada,    # H
                 ""                  # I Bateria_Salida
             ])
 
+            time.sleep(1)  # 🔥 JUSTO AQUÍ (MUY IMPORTANTE)
+
             return nombre
+
     except Exception as e:
         print(f"Error al registrar entrada: {e}")
+
     return None
 
 
@@ -733,50 +737,74 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
     for intento in range(max_reintentos):
         try:
+            print(f"🔄 Intento {intento + 1} de {max_reintentos}")
 
+            # 🔌 Verificar internet
             if not verificar_internet():
+                print("⚠️ Sin internet, reintentando...")
                 time.sleep(2)
                 continue
 
+            # 🔄 Reconectar si es necesario
             if hoja_registros is None:
+                print("⚠️ Reconectando a Google Sheets...")
                 if not conectar_google_sheets():
                     time.sleep(2)
                     continue
 
+            # ⏱ Obtener datos actualizados SIEMPRE
+            registros = hoja_registros.get_all_values()
+
+            if not registros:
+                print("⚠️ Hoja vacía, reintentando...")
+                time.sleep(1)
+                continue
+
             hora, _ = obtener_hora_internet()
             bateria_salida = obtener_porcentaje_bateria()
 
-            matriculas = hoja_registros.col_values(1)
-            horas_salida = hoja_registros.col_values(6)
-            laptops = hoja_registros.col_values(7)
+            # 🔍 Buscar la sesión desde el final
+            for i in reversed(range(len(registros))):
+                fila = registros[i]
 
-            for i in reversed(range(len(matriculas))):
+                if fila[COL_MATRICULA] == matricula:
 
-                if matriculas[i] == matricula:
+                    hora_salida = fila[COL_HORA_SALIDA].strip()
+                    laptop_registro = fila[COL_LAPTOP_ID]
 
-                    if (
-                        laptops[i] == laptop_actual and
-                        horas_salida[i].strip() == ""
-                    ):
+                    # ✅ Caso ideal (misma laptop)
+                    if laptop_registro == laptop_actual and hora_salida == "":
+                        print("✔️ Sesión encontrada en esta laptop")
+
                         hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                         hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
+
                         return True
 
-                    if horas_salida[i].strip() == "":
+                    # 🔁 Fallback (otra laptop)
+                    if hora_salida == "":
+                        print(f"⚠️ Sesión activa en otra laptop: {laptop_registro}")
+
                         hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                         hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
-                        return True   
 
-            print(f"⚠️ Intento {intento+1}: no se encontró sesión activa")
+                        return True
+
+                    # ❌ Ya estaba cerrada
+                    print("ℹ️ La sesión ya tenía hora de salida")
+                    return False
+
+            # ❌ No encontró sesión
+            print("⚠️ No se encontró sesión activa, reintentando...")
             time.sleep(1)
-            continue
 
         except Exception as e:
-            print(f"Error intento {intento + 1}: {e}")
+            print(f"❌ Error intento {intento + 1}: {e}")
             time.sleep(2)
-            print("❌ No se pudo registrar salida después de varios intentos")
 
+    print("❌ No se pudo registrar salida después de varios intentos")
     return False
+
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     """Muestra ventana de espera mientras se intenta registrar la salida"""
