@@ -752,16 +752,28 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
             for i in reversed(range(len(matriculas))):
 
-                if (
-                    matriculas[i] == matricula and
-                    laptops[i] == laptop_actual and
-                    horas_salida[i].strip() == ""
-                ):
+                if matriculas[i] == matricula:
 
-                    hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
-                    hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
+                    # ✅ caso ideal
+                    if (
+                        laptops[i] == laptop_actual and
+                        horas_salida[i].strip() == ""
+                    ):
+                        print("✔️ Sesión encontrada en esta laptop")
 
-                    return True
+                        hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
+                        hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
+
+                        return True
+
+                    # 🔁 fallback
+                    if horas_salida[i].strip() == "":
+                        print(f"⚠️ Sesión activa en otra laptop: {laptops[i]}")
+
+                        hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
+                        hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
+
+                        return True   
 
             # 👇 SI NO ENCUENTRA NADA
             print("⚠️ No se encontró sesión activa para cerrar")
