@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.7"
+VERSION_SISTEMA = "v1.1.8"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -908,11 +908,7 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     return ventana_espera
 
 def entregar_y_apagar(ventana, matricula, nombre):
-    """
-    Maneja entrega correctamente incluso si ya fue registrada
-    """
 
-    # 🔴 Validar conexión
     if not verificar_internet():
         messagebox.showerror(
             "Sin conexión a internet",
@@ -923,38 +919,44 @@ def entregar_y_apagar(ventana, matricula, nombre):
     laptop_actual = socket.gethostname()
     registros = hoja_registros.get_all_values()
 
-    # 🔍 Buscar última sesión
     for fila in reversed(registros):
         if fila[COL_MATRICULA] == matricula:
 
             hora_salida = fila[COL_HORA_SALIDA].strip()
             laptop_registro = fila[COL_LAPTOP_ID]
+            bateria_salida = fila[COL_BATERIA_SALIDA].strip()
 
-            # ✅ CASO 1: ya se registró salida en esta laptop
-            if laptop_registro == laptop_actual and hora_salida != "":
-                print("ℹ️ La salida ya estaba registrada en esta laptop")
-
+            # ✅ CASO 1: ya se entregó normalmente en esta laptop
+            if laptop_registro == laptop_actual and hora_salida != "" and bateria_salida != "CIERRE_AUTOMATICO_POR_NUEVA_SESION":
                 messagebox.showinfo(
                     "Entrega ya registrada",
-                    "La salida ya fue registrada correctamente.\n\n"
-                    "La laptop se apagará."
+                    "La salida ya fue registrada correctamente.\n\nLa laptop se apagará."
                 )
-
                 ventana.destroy()
                 os.system("shutdown /s /t 3")
                 return
 
-            # ✅ CASO 2: sesión activa correcta
+            # ⚠️ CASO 2: sesión cerrada automáticamente por otra laptop
+            if laptop_registro == laptop_actual and bateria_salida == "CIERRE_AUTOMATICO_POR_NUEVA_SESION":
+                messagebox.showwarning(
+                    "Sesión cerrada automáticamente",
+                    "Esta sesión fue cerrada automáticamente desde otro equipo.\n\n"
+                    "La laptop se apagará."
+                )
+                ventana.destroy()
+                os.system("shutdown /s /t 3")
+                return
+
+            # ✅ CASO 3: sesión activa correcta
             if laptop_registro == laptop_actual and hora_salida == "":
                 mostrar_ventana_espera_registro(ventana, matricula, nombre)
                 return
 
-            # 🚫 CASO 3: otra laptop
+            # 🚫 CASO 4: otra laptop
             if hora_salida == "" and laptop_registro != laptop_actual:
                 messagebox.showerror(
                     "Error",
-                    "Esta sesión pertenece a otra laptop.\n\n"
-                    "No puedes entregarla desde este equipo."
+                    "Esta sesión pertenece a otra laptop."
                 )
                 return
 
@@ -965,6 +967,7 @@ def entregar_y_apagar(ventana, matricula, nombre):
         "Error",
         "No se encontró una sesión válida."
     )
+
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
