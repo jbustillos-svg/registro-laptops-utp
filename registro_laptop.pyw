@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.1.9"
+VERSION_SISTEMA = "v1.2.0"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -966,6 +966,7 @@ def entregar_y_apagar(ventana, matricula, nombre):
 
 def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
+
     
     # 🔑 CLAVE: ventana independiente
     ventana_entrega.transient(None)
@@ -1474,11 +1475,6 @@ def crear_pantalla_login():
 
     ventana.configure(bg=COLOR_FONDO)
 
-    def forzar_mayusculas(event):
-        texto = entrada.get()
-        entrada.delete(0, tk.END)
-        entrada.insert(0, texto.upper())
-
     main_container = tk.Frame(ventana, bg=COLOR_FONDO)
     main_container.pack(fill=tk.BOTH, expand=True)
 
@@ -1539,7 +1535,18 @@ def crear_pantalla_login():
         highlightcolor=COLOR_PRIMARIO
     )
     entrada.pack(fill=tk.X, ipady=12, pady=(0, 18))
-    entrada.focus()
+
+    # 🔥 FORZAR FOCO CORRECTAMENTE
+    ventana.after(200, lambda: entrada.focus_set())
+
+        # =========================
+    # VALIDACIÓN SOLO NÚMEROS
+    # =========================
+    def solo_numeros(P):
+        return P.isdigit() or P == ""
+
+    vcmd = (ventana.register(solo_numeros), "%P")
+    entrada.config(validate="key", validatecommand=vcmd)
 
         # =========================
         # CONFIRMACIÓN ESTADO LAPTOP
@@ -1599,7 +1606,6 @@ def crear_pantalla_login():
     tk.Frame(check_frame, height=1, bg=COLOR_BORDE).pack(fill=tk.X, pady=(15, 0))
 
   
-    entrada.bind("<KeyRelease>", forzar_mayusculas)
     entrada.bind("<Return>", lambda e: iniciar_sesion())
 
 
@@ -1647,6 +1653,8 @@ def crear_pantalla_login():
 
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
+ventana.bind_all("<Control-Alt-u>", cerrar_sistema_admin)
+ventana.bind_all("<Control-Alt-U>", cerrar_sistema_admin)
 ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | {VERSION_SISTEMA}")
 
 # Pantalla completa sin bordes
