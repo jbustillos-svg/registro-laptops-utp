@@ -19,7 +19,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.2.0"
+VERSION_SISTEMA = "v1.2.1"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -413,9 +413,13 @@ def cargar_logo(ruta_imagen, ancho, alto):
 
 def verificar_internet():
     try:
-        requests.get("https://clients3.google.com/generate_204", timeout=3)
+        requests.get(
+            "https://sheets.googleapis.com",
+            timeout=15
+        )
         return True
-    except:
+    except Exception as e:
+        print(f"Error internet: {e}")
         return False
 
 
@@ -1650,6 +1654,8 @@ def crear_pantalla_login():
         fg=COLOR_TEXTO_SECUNDARIO,
         bg=COLOR_TARJETA
     ).pack(side=tk.BOTTOM, anchor="e", padx=12, pady=(5, 8))
+
+
 
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
