@@ -21,7 +21,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.2.2"
+VERSION_SISTEMA = "v1.2.3"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -30,6 +30,19 @@ procesando_sesion = False
 aviso_internet = None
 acepta_estado_equipo = None
 chk_label = None
+LOG_FILE = "diagnostico_conexion.log"
+
+# --- FUNCIÓN DE LOGGING ---
+def log_diagnostico(mensaje):
+    """Escribe mensajes de diagnóstico en un archivo"""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        linea = f"[{timestamp}] {mensaje}"
+        print(linea)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(linea + "\n")
+    except:
+        print(mensaje)
 
 # =========================
 # COLUMNAS HOJA REGISTROS (0-based)
@@ -420,12 +433,19 @@ def verificar_internet():
         "https://www.microsoft.com"
     ]
 
+    log_diagnostico("=== INICIANDO VERIFICACIÓN DE INTERNET ===")
+
     for url in urls_prueba:
         try:
+            log_diagnostico(f"Probando URL: {url}")
             host = urlparse(url).hostname
+            
             if host:
+                log_diagnostico(f"Resolviendo DNS para: {host}")
                 socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+                log_diagnostico(f"✓ DNS resuelto para {host}")
 
+            log_diagnostico(f"Realizando petición HTTP a {url} (timeout 8s)...")
             respuesta = requests.get(
                 url,
                 timeout=8,
@@ -434,31 +454,63 @@ def verificar_internet():
                 allow_redirects=True
             )
 
+            log_diagnostico(f"✓ Respuesta: código {respuesta.status_code}")
             if respuesta.status_code < 500:
+                log_diagnostico("✓✓✓ INTERNET OK - CONEXIÓN EXITOSA")
                 return True
+                
+        except socket.gaierror as e:
+            log_diagnostico(f"✗ Error DNS para {url}: {e}")
+        except requests.exceptions.Timeout:
+            log_diagnostico(f"✗ Timeout en {url}: la conexión tardó más de 8 segundos")
+        except requests.exceptions.SSLError as e:
+            log_diagnostico(f"✗ Error SSL/Certificado en {url}: {e}")
+        except requests.exceptions.ConnectionError as e:
+            log_diagnostico(f"✗ Error de conexión en {url}: {e}")
         except Exception as e:
-            print(f"Error internet con {url}: {e}")
+            log_diagnostico(f"✗ Error general con {url}: {type(e).__name__} - {e}")
 
+    log_diagnostico("✗✗✗ INTERNET FALLÓ - TODAS LAS URLs FALLARON")
     return False
 
 
 def conectar_google_sheets():
     global hoja_alumnos, hoja_registros
+    log_diagnostico("Iniciando conexión a Google Sheets...")
+    
     if not verificar_internet():
+        log_diagnostico("✗ Google Sheets: No hay conexión a internet")
         cambiar_estado("🔴 Sin conexión a internet", COLOR_ERROR)
         return False
     
+    log_diagnostico("✓ Internet disponible, conectando a Google Sheets...")
     cambiar_estado("🟡 Conectando...", COLOR_ADVERTENCIA)
     try:
+        log_diagnostico("Cargando credenciales desde credenciales.json...")
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
+        
+        log_diagnostico("Autorizando cliente de gspread...")
         client = gspread.authorize(creds)
+        
+        log_diagnostico("Abriendo spreadsheet 'Control de Laptops'...")
         sheet = client.open("Control de Laptops")
+        
+        log_diagnostico("Obteniendo hojas...")
         hoja_alumnos = sheet.worksheet("Alumnos")
         hoja_registros = sheet.worksheet("Registros")
+        
+        log_diagnostico("✓✓✓ GOOGLE SHEETS CONECTADO EXITOSAMENTE")
         cambiar_estado("🟢 Conectado", COLOR_EXITO)
         return True
+    except FileNotFoundError:
+        log_diagnostico("✗ Error: No encontrado credenciales.json en la carpeta")
+        hoja_alumnos = None
+        hoja_registros = None
+        cambiar_estado("🔴 Error: Falta credenciales.json", COLOR_ERROR)
+        return False
     except Exception as e:
+        log_diagnostico(f"✗ Error en Google Sheets: {type(e).__name__} - {e}")
         hoja_alumnos = None
         hoja_registros = None
         cambiar_estado("🔴 Error en la conexión", COLOR_ERROR)
