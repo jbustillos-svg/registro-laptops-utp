@@ -10,6 +10,8 @@ import pytz
 import os
 import time
 import psutil
+import certifi
+from urllib.parse import urlparse
 
 # Intentar importar PIL, si no está disponible usar emojis
 try:
@@ -19,7 +21,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.2.1"
+VERSION_SISTEMA = "v1.2.2"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -412,15 +414,32 @@ def cargar_logo(ruta_imagen, ancho, alto):
         return None
 
 def verificar_internet():
-    try:
-        requests.get(
-            "https://sheets.googleapis.com",
-            timeout=15
-        )
-        return True
-    except Exception as e:
-        print(f"Error internet: {e}")
-        return False
+    urls_prueba = [
+        "https://www.google.com",
+        "https://sheets.googleapis.com",
+        "https://www.microsoft.com"
+    ]
+
+    for url in urls_prueba:
+        try:
+            host = urlparse(url).hostname
+            if host:
+                socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+
+            respuesta = requests.get(
+                url,
+                timeout=8,
+                verify=certifi.where(),
+                headers={"User-Agent": "Mozilla/5.0"},
+                allow_redirects=True
+            )
+
+            if respuesta.status_code < 500:
+                return True
+        except Exception as e:
+            print(f"Error internet con {url}: {e}")
+
+    return False
 
 
 def conectar_google_sheets():
@@ -472,7 +491,12 @@ def detener_verificacion_conexion():
 
 def obtener_hora_internet():
     try:
-        response = requests.get("http://worldtimeapi.org/api/timezone/America/Chihuahua", timeout=5)
+        response = requests.get(
+            "http://worldtimeapi.org/api/timezone/America/Chihuahua",
+            timeout=5,
+            verify=certifi.where(),
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
         hora_utc = datetime.fromisoformat(response.json()["datetime"].split(".")[0])
         return zona_horaria.localize(hora_utc).strftime("%H:%M:%S"), zona_horaria.localize(hora_utc).strftime("%Y-%m-%d")
     except:
