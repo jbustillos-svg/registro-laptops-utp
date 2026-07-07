@@ -11,7 +11,6 @@ import os
 import time
 import psutil
 import certifi
-from urllib.parse import urlparse
 
 # Intentar importar PIL, si no está disponible usar emojis
 try:
@@ -21,7 +20,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "v1.2.3"
+VERSION_SISTEMA = "v1.2.5"
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -30,19 +29,7 @@ procesando_sesion = False
 aviso_internet = None
 acepta_estado_equipo = None
 chk_label = None
-LOG_FILE = "diagnostico_conexion.log"
-
-# --- FUNCIÓN DE LOGGING ---
-def log_diagnostico(mensaje):
-    """Escribe mensajes de diagnóstico en un archivo"""
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        linea = f"[{timestamp}] {mensaje}"
-        print(linea)
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(linea + "\n")
-    except:
-        print(mensaje)
+verificacion_aviso_en_curso = False
 
 # =========================
 # COLUMNAS HOJA REGISTROS (0-based)
@@ -57,7 +44,7 @@ COL_LAPTOP_ID = 6
 COL_BATERIA_ENTRADA = 7
 COL_BATERIA_SALIDA = 8
 # =========================
-# 🎨 PALETA DE COLORES MODERNA
+# PALETA DE COLORES MODERNA
 # =========================
 COLOR_PRIMARIO = "#0066cc"          # Azul principal
 COLOR_SECUNDARIO = "#00a8ff"       # Azul claro
@@ -149,9 +136,9 @@ def mostrar_ventana_control_unificada(
     boton_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
 
-    # 🔴 USUARIO SANCIONADO
+    # USUARIO SANCIONADO
     if estado == "SANCIONADO":
-        titulo = "🚫 USUARIO SANCIONADO"
+        titulo = "USUARIO SANCIONADO"
         color = COLOR_ERROR
         mensaje = (
             f"No entregas registradas: {no_entregas} de 4\n\n"
@@ -159,8 +146,8 @@ def mostrar_ventana_control_unificada(
             "Acude con el administrador."
         )
     else:
-        # ⚠️ AVISO GENERAL
-        titulo = "⚠️ AVISO IMPORTANTE"
+        # AVISO GENERAL
+        titulo = "AVISO IMPORTANTE"
         color = COLOR_ADVERTENCIA
 
         mensaje = (
@@ -203,8 +190,8 @@ def mostrar_ventana_control_unificada(
     
     tk.Button(
         boton_frame,
-        text="✔ ENTENDIDO",
-        font=("Segoe UI", 13, "bold"),   # ⬅ más equilibrado
+        text="ENTENDIDO",
+        font=("Segoe UI", 13, "bold"),   # ? más equilibrado
         bg=COLOR_PRIMARIO,
         fg="white",
         bd=0,
@@ -215,16 +202,16 @@ def mostrar_ventana_control_unificada(
         command=ventana_ctrl.destroy
     ).pack(
         fill=tk.X,
-        padx=90,        # ⬅ más angosto
+        padx=90,        # ? más angosto
         pady=(8, 5),
-        ipady=6         # ⬅ altura fina y controlada
+        ipady=6         # ? altura fina y controlada
     )
 
 
 
 
 
-    # ⏸️ ESPERAR a que el usuario cierre la ventana
+    # ESPERAR a que el usuario cierre la ventana
     ventana_ctrl.wait_window()
 
 def incrementar_no_entregas(matricula):
@@ -249,7 +236,7 @@ def incrementar_no_entregas(matricula):
         no_entregas_nuevo = no_entregas_actual + 1
         hoja_alumnos.update_cell(fila, 5, no_entregas_nuevo)
 
-        # ⚠️ NO TOCAR columna del estado (tiene fórmula)
+        # NO TOCAR columna del estado (tiene fórmula)
         return no_entregas_nuevo, "CALCULADO_POR_FORMULA"
 
     except Exception as e:
@@ -365,7 +352,7 @@ def mostrar_instrucciones_iniciales(matricula=""):
     bg=COLOR_TARJETA,
     wrap=tk.WORD,
     relief=tk.FLAT,
-    height=8,        # 👈 clave
+    height=8,        # clave
     padx=20,
     pady=4
 )
@@ -379,7 +366,7 @@ def mostrar_instrucciones_iniciales(matricula=""):
 
     tk.Button(
         frame,
-        text="✔ ENTENDIDO",
+        text="ENTENDIDO",
         font=FUENTE_BOTON,
         bg=COLOR_EXITO,
         fg="white",
@@ -433,87 +420,54 @@ def verificar_internet():
         "https://www.microsoft.com"
     ]
 
-    log_diagnostico("=== INICIANDO VERIFICACIÓN DE INTERNET ===")
-
     for url in urls_prueba:
         try:
-            log_diagnostico(f"Probando URL: {url}")
-            host = urlparse(url).hostname
-            
-            if host:
-                log_diagnostico(f"Resolviendo DNS para: {host}")
-                socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-                log_diagnostico(f"✓ DNS resuelto para {host}")
-
-            log_diagnostico(f"Realizando petición HTTP a {url} (timeout 8s)...")
             respuesta = requests.get(
                 url,
-                timeout=8,
+                timeout=2,
                 verify=certifi.where(),
                 headers={"User-Agent": "Mozilla/5.0"},
                 allow_redirects=True
             )
-
-            log_diagnostico(f"✓ Respuesta: código {respuesta.status_code}")
             if respuesta.status_code < 500:
-                log_diagnostico("✓✓✓ INTERNET OK - CONEXIÓN EXITOSA")
                 return True
                 
-        except socket.gaierror as e:
-            log_diagnostico(f"✗ Error DNS para {url}: {e}")
-        except requests.exceptions.Timeout:
-            log_diagnostico(f"✗ Timeout en {url}: la conexión tardó más de 8 segundos")
-        except requests.exceptions.SSLError as e:
-            log_diagnostico(f"✗ Error SSL/Certificado en {url}: {e}")
-        except requests.exceptions.ConnectionError as e:
-            log_diagnostico(f"✗ Error de conexión en {url}: {e}")
         except Exception as e:
-            log_diagnostico(f"✗ Error general con {url}: {type(e).__name__} - {e}")
+            pass
 
-    log_diagnostico("✗✗✗ INTERNET FALLÓ - TODAS LAS URLs FALLARON")
     return False
 
 
 def conectar_google_sheets():
     global hoja_alumnos, hoja_registros
-    log_diagnostico("Iniciando conexión a Google Sheets...")
     
     if not verificar_internet():
-        log_diagnostico("✗ Google Sheets: No hay conexión a internet")
-        cambiar_estado("🔴 Sin conexión a internet", COLOR_ERROR)
+        cambiar_estado("Sin conexión a internet", COLOR_ERROR)
         return False
     
-    log_diagnostico("✓ Internet disponible, conectando a Google Sheets...")
-    cambiar_estado("🟡 Conectando...", COLOR_ADVERTENCIA)
+    cambiar_estado("Conectando...", COLOR_ADVERTENCIA)
     try:
-        log_diagnostico("Cargando credenciales desde credenciales.json...")
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
         
-        log_diagnostico("Autorizando cliente de gspread...")
         client = gspread.authorize(creds)
         
-        log_diagnostico("Abriendo spreadsheet 'Control de Laptops'...")
         sheet = client.open("Control de Laptops")
         
-        log_diagnostico("Obteniendo hojas...")
         hoja_alumnos = sheet.worksheet("Alumnos")
         hoja_registros = sheet.worksheet("Registros")
         
-        log_diagnostico("✓✓✓ GOOGLE SHEETS CONECTADO EXITOSAMENTE")
-        cambiar_estado("🟢 Conectado", COLOR_EXITO)
+        cambiar_estado("Conectado", COLOR_EXITO)
         return True
     except FileNotFoundError:
-        log_diagnostico("✗ Error: No encontrado credenciales.json en la carpeta")
         hoja_alumnos = None
         hoja_registros = None
-        cambiar_estado("🔴 Error: Falta credenciales.json", COLOR_ERROR)
+        cambiar_estado("Error: Falta credenciales.json", COLOR_ERROR)
         return False
     except Exception as e:
-        log_diagnostico(f"✗ Error en Google Sheets: {type(e).__name__} - {e}")
         hoja_alumnos = None
         hoja_registros = None
-        cambiar_estado("🔴 Error en la conexión", COLOR_ERROR)
+        cambiar_estado("Error en la conexión", COLOR_ERROR)
         return False
 
 def verificar_conexion_periodicamente():
@@ -524,14 +478,12 @@ def verificar_conexion_periodicamente():
             if hoja_alumnos is None or hoja_registros is None:
                 if conectar_google_sheets():
                     # Cerrar aviso de internet si está abierto
-                    if aviso_internet and aviso_internet.winfo_exists():
-                        aviso_internet.destroy()
-                        aviso_internet = None
+                    ejecutar_en_ui(cerrar_aviso_internet)
                     
             else:
-                cambiar_estado("🟢 Conectado", COLOR_EXITO)
+                cambiar_estado("Conectado", COLOR_EXITO)
         else:
-            cambiar_estado("🔴 Sin conexión a internet", COLOR_ERROR)
+            cambiar_estado("Sin conexión a internet", COLOR_ERROR)
             if hoja_alumnos is None or hoja_registros is None:
                 conectar_google_sheets()
         
@@ -541,6 +493,23 @@ def detener_verificacion_conexion():
     global verificar_conexion_activo
     verificar_conexion_activo = False
 
+def ejecutar_en_ui(func, *args):
+    try:
+        if threading.current_thread() is threading.main_thread():
+            func(*args)
+        else:
+            ventana.after(0, lambda: func(*args))
+    except:
+        pass
+
+def cerrar_aviso_internet():
+    global aviso_internet
+    try:
+        if aviso_internet and aviso_internet.winfo_exists():
+            aviso_internet.destroy()
+        aviso_internet = None
+    except:
+        aviso_internet = None
 def obtener_hora_internet():
     try:
         response = requests.get(
@@ -646,7 +615,7 @@ def pedir_curp_ultimos_2(parent):
 
     resultado = {"valor": None}
 
-    # 🔑 VARIABLE CONTROLADA
+    # VARIABLE CONTROLADA
     curp_var = tk.StringVar()
 
     def controlar_texto(*args):
@@ -660,7 +629,7 @@ def pedir_curp_ultimos_2(parent):
         if curp_var.get() != valor:
             curp_var.set(valor)
 
-    # 🔗 Vincular control
+    # Vincular control
     curp_var.trace_add("write", controlar_texto)
 
     entrada = tk.Entry(
@@ -668,7 +637,7 @@ def pedir_curp_ultimos_2(parent):
         textvariable=curp_var,
         font=("Segoe UI", 16),
         justify="center",
-        width=8,      # 👈 alargado, no gigante
+        width=8,      # alargado, no gigante
     )
     entrada.pack(pady=10, ipady=6)
     entrada.focus()
@@ -719,7 +688,7 @@ def verificar_entrega_pendiente(matricula):
                     fecha_entrada = registros[i][COL_FECHA]
                     laptop_id = registros[i][COL_LAPTOP_ID]
                     return True, fecha_entrada, laptop_id
-                break  # 👈 SOLO cuando ya encontró la matrícula
+                break  # SOLO cuando ya encontró la matrícula
 
     except Exception as e:
         print(f"Error al verificar entrega pendiente: {e}")
@@ -741,7 +710,7 @@ def procesar_no_entrega_si_corresponde(matricula):
                 hora_salida = fila[COL_HORA_SALIDA].strip()
                 confirmacion = fila[COL_CONFIRMACION].strip()
 
-                # 🔥 NO ENTREGA: confirmo entrada pero nunca entregó
+                # NO ENTREGA: confirmo entrada pero nunca entregó
                 if hora_salida == "" and confirmacion == "CONFIRMADO":
                     incrementar_no_entregas(matricula)
                     hoja_registros.update_cell(
@@ -801,7 +770,7 @@ def registrar_entrada(matricula):
                 ""                  # I Bateria_Salida
             ])
 
-            time.sleep(1)  # 🔥 JUSTO AQUÍ (MUY IMPORTANTE)
+            time.sleep(1)  # JUSTO AQUÍ (MUY IMPORTANTE)
 
             return nombre
 
@@ -817,33 +786,33 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
 
     for intento in range(max_reintentos):
         try:
-            print(f"🔄 Intento {intento + 1} de {max_reintentos}")
+            print(f"Intento {intento + 1} de {max_reintentos}")
 
-            # 🔌 Verificar internet
+            # Verificar internet
             if not verificar_internet():
-                print("⚠️ Sin internet, reintentando...")
+                print("Sin internet, reintentando...")
                 time.sleep(2)
                 continue
 
-            # 🔄 Reconectar si es necesario
+            # Reconectar si es necesario
             if hoja_registros is None:
-                print("⚠️ Reconectando a Google Sheets...")
+                print("Reconectando a Google Sheets...")
                 if not conectar_google_sheets():
                     time.sleep(2)
                     continue
 
-            # ⏱ Obtener datos actualizados SIEMPRE
+            # ? Obtener datos actualizados SIEMPRE
             registros = hoja_registros.get_all_values()
 
             if not registros:
-                print("⚠️ Hoja vacía, reintentando...")
+                print("Hoja vacía, reintentando...")
                 time.sleep(1)
                 continue
 
             hora, _ = obtener_hora_internet()
             bateria_salida = obtener_porcentaje_bateria()
 
-            # 🔍 Buscar la sesión desde el final
+            # Buscar la sesión desde el final
             for i in reversed(range(len(registros))):
                 fila = registros[i]
 
@@ -852,33 +821,33 @@ def registrar_salida_con_reintentos(nombre, matricula, max_reintentos=5):
                     hora_salida = fila[COL_HORA_SALIDA].strip()
                     laptop_registro = fila[COL_LAPTOP_ID]
 
-                    # ✅ SOLO MI LAPTOP puede cerrar SU sesión
+                    # ? SOLO MI LAPTOP puede cerrar SU sesión
                     if laptop_registro == laptop_actual and hora_salida == "":
-                        print("✔️ Sesión encontrada en esta laptop")
+                        print("Sesión encontrada en esta laptop")
 
                         hoja_registros.update_cell(i + 1, COL_HORA_SALIDA + 1, hora)
                         hoja_registros.update_cell(i + 1, COL_BATERIA_SALIDA + 1, bateria_salida)
 
                         return True
 
-                    # 🚫 Si es de otra laptop → NO tocar
+                    # Si es de otra laptop ? NO tocar
                     if hora_salida == "" and laptop_registro != laptop_actual:
-                        print(f"🚫 Sesión pertenece a otra laptop: {laptop_registro}")
+                        print(f"Sesión pertenece a otra laptop: {laptop_registro}")
                         return False
 
-                    # ℹ️ Ya estaba cerrada
-                    print("ℹ️ La sesión ya tenía hora de salida")
+                    # Ya estaba cerrada
+                    print("La sesión ya tenía hora de salida")
                     return False
 
-            # ❌ No encontró sesión
-            print("⚠️ No se encontró sesión activa, reintentando...")
+            # ? No encontró sesión
+            print("No se encontró sesión activa, reintentando...")
             time.sleep(1)
 
         except Exception as e:
-            print(f"❌ Error intento {intento + 1}: {e}")
+            print(f"Error intento {intento + 1}: {e}")
             time.sleep(2)
 
-    print("❌ No se pudo registrar salida después de varios intentos")
+    print("? No se pudo registrar salida después de varios intentos")
     return False
 
 
@@ -905,7 +874,7 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
     
     # Icono de carga
     tk.Label(frame, 
-             text="🔄",
+             text="...",
              font=("Segoe UI", 20),
              bg=COLOR_TARJETA).pack(pady=(0, 10))
     
@@ -957,13 +926,13 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre):
                 actualizar_progreso(5, "Registrando salida...")
                 
             if registrar_salida_con_reintentos(nombre, matricula):
-                actualizar_progreso(6, "✅ Salida registrada correctamente")
+                actualizar_progreso(6, "? Salida registrada correctamente")
                 time.sleep(1)
                 ventana_espera.destroy()
                 return True
             else:
                 if i == 4:  # Último intento fallido
-                    actualizar_progreso(5, "❌ Error al registrar salida")
+                    actualizar_progreso(5, "Error al registrar salida")
                     time.sleep(2)
                     ventana_espera.destroy()
                     return False
@@ -1001,13 +970,13 @@ def entregar_y_apagar(ventana, matricula, nombre):
 
     fila_encontrada = None
 
-    # 🔥 BUSCAR SOLO LA ÚLTIMA SESIÓN DE ESTA LAPTOP
+    # BUSCAR SOLO LA ÚLTIMA SESIÓN DE ESTA LAPTOP
     for fila in reversed(registros):
         if fila[COL_MATRICULA] == matricula and fila[COL_LAPTOP_ID] == laptop_actual:
             fila_encontrada = fila
             break
 
-    # ❌ No hay sesión en esta laptop
+    # ? No hay sesión en esta laptop
     if not fila_encontrada:
         messagebox.showerror(
             "Error",
@@ -1018,7 +987,7 @@ def entregar_y_apagar(ventana, matricula, nombre):
     hora_salida = fila_encontrada[COL_HORA_SALIDA].strip()
     bateria_salida = fila_encontrada[COL_BATERIA_SALIDA].strip()
 
-    # ⚠️ CASO 1: Cierre automático por otra laptop
+    # CASO 1: Cierre automático por otra laptop
     if bateria_salida == "CIERRE_AUTOMATICO_POR_NUEVA_SESION":
         messagebox.showwarning(
             "Sesión cerrada automáticamente",
@@ -1029,7 +998,7 @@ def entregar_y_apagar(ventana, matricula, nombre):
         os.system("shutdown /s /t 3")
         return
 
-    # ✅ CASO 2: Ya entregada normalmente
+    # ? CASO 2: Ya entregada normalmente
     if hora_salida != "":
         messagebox.showinfo(
             "Entrega ya registrada",
@@ -1039,7 +1008,7 @@ def entregar_y_apagar(ventana, matricula, nombre):
         os.system("shutdown /s /t 3")
         return
 
-    # ✅ CASO 3: Sesión activa → registrar salida
+    # ? CASO 3: Sesión activa ? registrar salida
     mostrar_ventana_espera_registro(ventana, matricula, nombre)
 
 
@@ -1048,13 +1017,13 @@ def mostrar_ventana_entrega(nombre, matricula):
     ventana_entrega = tk.Toplevel()
 
     
-    # 🔑 CLAVE: ventana independiente
+    # CLAVE: ventana independiente
     ventana_entrega.transient(None)
     ventana_entrega.title("Entrega de Laptop")
     ventana_entrega.resizable(False, False)
     ventana_entrega.configure(bg=COLOR_FONDO)
 
-    # ❌ Bloquear cerrar, pero NO minimizar
+    # ? Bloquear cerrar, pero NO minimizar
     ventana_entrega.protocol("WM_DELETE_WINDOW", lambda: None)
 
     # Permitir minimizar
@@ -1098,7 +1067,7 @@ def mostrar_ventana_entrega(nombre, matricula):
     # Botón principal
     tk.Button(
         frame_principal,
-        text="🚀 ENTREGAR Y APAGAR",
+        text="ENTREGAR Y APAGAR",
         font=FUENTE_BOTON,
         bg=COLOR_ERROR,
         fg="white",
@@ -1146,7 +1115,7 @@ def formatear_fecha(fecha_entrada):
 def mostrar_aviso_entrega_pendiente(fecha_entrada, laptop_id):
     fecha_formateada = formatear_fecha(fecha_entrada)
     
-    mensaje = f"⚠️ Olvidaste entregar la laptop\n\n"
+    mensaje = f"Olvidaste entregar la laptop\n\n"
     mensaje += f"Laptop: {laptop_id}\n"
     mensaje += f"Fecha: {fecha_formateada}\n\n"
     mensaje += "Recuerda siempre usar el botón 'Entregar y Apagar'"
@@ -1183,7 +1152,7 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
 def mostrar_confirmacion_simple(nombre, matricula):
     global entrada, ventana, procesando_sesion
 
-    # 🔓 LIBERAR ESTADO SIEMPRE AL ENTRAR AQUÍ
+    # LIBERAR ESTADO SIEMPRE AL ENTRAR AQUÍ
     procesando_sesion = False
     btn_entrar.config(state="normal")
 
@@ -1201,7 +1170,7 @@ def mostrar_confirmacion_simple(nombre, matricula):
         return False
 
     
-    # 🔒 VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
+    # VERIFICAR SESIÓN ACTIVA EN OTRA LAPTOP
     sesion_activa, laptop_otro = verificar_sesion_activa_en_otra_laptop(matricula)
 
     if sesion_activa:
@@ -1223,7 +1192,7 @@ def mostrar_confirmacion_simple(nombre, matricula):
             return False
 
 
-        # 🔥 Cerrar sesión anterior y contar NO ENTREGA
+        # Cerrar sesión anterior y contar NO ENTREGA
         exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
 
         if not exito:
@@ -1234,10 +1203,10 @@ def mostrar_confirmacion_simple(nombre, matricula):
             reiniciar_estado_sistema()
             return False
 
-    # 🔐 VALIDAR ROL
+    # VALIDAR ROL
     rol = buscar_rol(matricula)
 
-    # 🔒 VALIDACIÓN POR CURP SOLO PARA ALUMNOS
+    # VALIDACIÓN POR CURP SOLO PARA ALUMNOS
     if rol == "ALUMNO":
 
         curp_real = buscar_curp(matricula)
@@ -1265,7 +1234,7 @@ def mostrar_confirmacion_simple(nombre, matricula):
             return False
 
 
-    # 2. 🔥 CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
+    # 2. CONTAR NO ENTREGA AUTOMÁTICA (AQUÍ ES DONDE IBA ANTES)
     procesar_no_entrega_si_corresponde(matricula)
 
     # 3. Obtener control actualizado
@@ -1317,6 +1286,10 @@ def mostrar_confirmacion_simple(nombre, matricula):
 
 
 def cambiar_estado(texto, color=None):
+    if threading.current_thread() is not threading.main_thread():
+        ejecutar_en_ui(cambiar_estado, texto, color)
+        return
+
     estado_var.set(texto)
     if color:
         estado_label.config(fg=color)
@@ -1340,13 +1313,13 @@ def reiniciar_estado_sistema():
     btn_entrar.config(state="normal")
     # Actualizar estado de conexión actual
     if verificar_conexion_base_datos():
-        cambiar_estado("🟢 Conectado", COLOR_EXITO)
+        cambiar_estado("Conectado", COLOR_EXITO)
     else:
-        cambiar_estado("🔴 Sin conexión", COLOR_ERROR)
+        cambiar_estado("Sin conexión", COLOR_ERROR)
         if acepta_estado_equipo:
             acepta_estado_equipo.set(False)
             try:
-                chk_label.config(text="⬜ ")
+                pass
             except:
                 pass
 
@@ -1355,7 +1328,13 @@ def reiniciar_estado_sistema():
 def mostrar_aviso_internet_bloqueante():
     """Muestra un aviso emergente bloqueante que no se puede mover, cerrar ni minimizar"""
     global aviso_internet
-    
+
+    try:
+        if aviso_internet and aviso_internet.winfo_exists():
+            aviso_internet.lift()
+            return
+    except:
+        aviso_internet = None
     aviso_internet = tk.Toplevel(ventana)
     aviso_internet.title("Conexión Requerida")
     
@@ -1389,7 +1368,7 @@ def mostrar_aviso_internet_bloqueante():
     
     # Icono de advertencia
     tk.Label(frame_aviso, 
-             text="🔴",
+             text="!",
              font=("Segoe UI", 32),
              bg=COLOR_TARJETA).pack(pady=(10, 15))
     
@@ -1457,24 +1436,53 @@ def mostrar_aviso_internet_bloqueante():
                 progreso_actual = 0
                 direccion = 1
         
-        progress_bar_inner.config(width=progreso_actual)
-        aviso_internet.after(50, animar_barra_progreso)
+        try:
+            if not aviso_internet or not aviso_internet.winfo_exists():
+                return
+            progress_bar_inner.config(width=progreso_actual)
+            aviso_internet.after(50, animar_barra_progreso)
+        except:
+            return
     
-    # Función para verificar internet continuamente
+    # Función para verificar internet continuamente sin congelar la ventana
     def verificar_internet_continuamente():
-        if verificar_internet():
-            # Internet detectado, cerrar aviso
-            aviso_internet.destroy()
-            cambiar_estado("🟢 Conectado", COLOR_EXITO)
-            # Intentar conectar a Google Sheets
+        global verificacion_aviso_en_curso
+
+        if verificacion_aviso_en_curso:
+            return
+
+        try:
+            if not aviso_internet or not aviso_internet.winfo_exists():
+                return
+        except:
+            return
+
+        tiempo_transcurrido = int(time.time() - tiempo_inicio)
+        tiempo_label.config(text=f"Tiempo esperando: {tiempo_transcurrido} segundos")
+        estado_label.config(text=f"Verificando conexión... ({time.strftime('%H:%M:%S')})")
+        verificacion_aviso_en_curso = True
+
+        def revisar_conexion():
+            conectado = verificar_internet()
+            ejecutar_en_ui(procesar_resultado_conexion, conectado)
+
+        threading.Thread(target=revisar_conexion, daemon=True).start()
+
+    def procesar_resultado_conexion(conectado):
+        global verificacion_aviso_en_curso
+        verificacion_aviso_en_curso = False
+
+        try:
+            if not aviso_internet or not aviso_internet.winfo_exists():
+                return
+        except:
+            return
+
+        if conectado:
+            cerrar_aviso_internet()
+            cambiar_estado("Conectado", COLOR_EXITO)
             threading.Thread(target=conectar_google_sheets, daemon=True).start()
         else:
-            # Actualizar tiempo de espera
-            tiempo_transcurrido = int(time.time() - tiempo_inicio)
-            tiempo_label.config(text=f"Tiempo esperando: {tiempo_transcurrido} segundos")
-            
-            # Seguir verificando cada segundo
-            estado_label.config(text=f"Verificando conexión... ({time.strftime('%H:%M:%S')})")
             aviso_internet.after(1000, verificar_internet_continuamente)
     
     # Iniciar animación y verificación
@@ -1491,7 +1499,7 @@ def iniciar_sesion():
 
     procesando_sesion = True
     btn_entrar.config(state="disabled")
-    cambiar_estado("🟡 Verificando conexión...", COLOR_ADVERTENCIA)
+    cambiar_estado("Verificando conexión...", COLOR_ADVERTENCIA)
     ventana.update()
 
     matricula = entrada.get().strip()
@@ -1501,7 +1509,7 @@ def iniciar_sesion():
         entrada.focus()
         reiniciar_estado_sistema()
         return
-        # 🔒 Validar aceptación de estado del equipo
+        # Validar aceptación de estado del equipo
     if not acepta_estado_equipo.get():
         messagebox.showwarning(
             "Confirmación requerida",
@@ -1616,7 +1624,7 @@ def crear_pantalla_login():
     )
     entrada.pack(fill=tk.X, ipady=12, pady=(0, 18))
 
-    # 🔥 FORZAR FOCO CORRECTAMENTE
+    # FORZAR FOCO CORRECTAMENTE
     ventana.after(200, lambda: entrada.focus_set())
 
         # =========================
@@ -1637,48 +1645,54 @@ def crear_pantalla_login():
     check_frame = tk.Frame(card, bg=COLOR_TARJETA)
     check_frame.pack(padx=50, pady=(0, 25), fill=tk.X)
 
-        # Checkbutton con emoji que cambia
-    def update_check_emoji():
-            if acepta_estado_equipo.get():
-                chk_label.config(text="✅ ")
-            else:
-                chk_label.config(text="⬜ ")
-        
-        # Frame para alinear checkbox y texto
     check_content = tk.Frame(check_frame, bg=COLOR_TARJETA)
     check_content.pack(anchor="w")
 
-        # Label con emoji (hace las veces de checkbox)
-    chk_label = tk.Label(
-            check_content,
-            text="⬜ ",
-            font=("Segoe UI", 14),
-            fg=COLOR_PRIMARIO,
-            bg=COLOR_TARJETA,
-            cursor="hand2"
-        )
-    chk_label.pack(side=tk.LEFT, padx=(0, 10))
-    update_check_emoji()
+    chk_label = tk.Canvas(
+        check_content,
+        width=32,
+        height=32,
+        bg=COLOR_TARJETA,
+        highlightthickness=0,
+        cursor="hand2"
+    )
+    chk_label.pack(side=tk.LEFT, padx=(0, 14))
 
-        # Texto del checkbox
-    chk_text = tk.Label(
-            check_content,
-            text="Confirmo que la laptop está en buen estado\n" +
-                 "o ya reporté cualquier anomalía.",
-            font=("Segoe UI", 10),
-            fg=COLOR_TEXTO,
-            bg=COLOR_TARJETA,
-            justify="left",
-            cursor="hand2",
-            wraplength=300
+    def dibujar_check():
+        chk_label.delete("all")
+        chk_label.create_rectangle(
+            4, 4, 28, 28,
+            outline=COLOR_PRIMARIO,
+            width=3,
+            fill=COLOR_TARJETA
         )
+        if acepta_estado_equipo.get():
+            chk_label.create_line(
+                9, 17, 15, 23, 25, 10,
+                fill=COLOR_EXITO,
+                width=4,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND
+            )
+
+    chk_text = tk.Label(
+        check_content,
+        text="Confirmo que la laptop está en buen estado\n" +
+             "o ya reporté cualquier anomalía.",
+        font=("Segoe UI", 10),
+        fg=COLOR_TEXTO,
+        bg=COLOR_TARJETA,
+        justify="left",
+        cursor="hand2",
+        wraplength=300
+    )
     chk_text.pack(side=tk.LEFT)
 
-        # Hacer ambos elementos clickeables
     def toggle_check(event=None):
-            acepta_estado_equipo.set(not acepta_estado_equipo.get())
-            update_check_emoji()
+        acepta_estado_equipo.set(not acepta_estado_equipo.get())
+        dibujar_check()
 
+    dibujar_check()
     chk_label.bind("<Button-1>", toggle_check)
     chk_text.bind("<Button-1>", toggle_check)
 
@@ -1710,7 +1724,7 @@ def crear_pantalla_login():
     # =========================
     # ESTADO DE CONEXIÓN
     # =========================
-    estado_var = tk.StringVar(value="🟢 Conectado")
+    estado_var = tk.StringVar(value="Iniciando...")
     estado_label = tk.Label(
         card,
         textvariable=estado_var,
@@ -1732,6 +1746,23 @@ def crear_pantalla_login():
     ).pack(side=tk.BOTTOM, anchor="e", padx=12, pady=(5, 8))
 
 
+def iniciar_conexion_en_segundo_plano():
+    cambiar_estado("Verificando conexión...", COLOR_ADVERTENCIA)
+
+    def revisar_y_conectar():
+        if verificar_internet():
+            conectar_google_sheets()
+        else:
+            def mostrar_sin_conexion():
+                cambiar_estado("Sin conexión a internet", COLOR_ERROR)
+                mostrar_aviso_internet_bloqueante()
+
+            ejecutar_en_ui(mostrar_sin_conexion)
+
+    threading.Thread(target=revisar_y_conectar, daemon=True).start()
+
+def iniciar_verificacion_periodica():
+    threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
 
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
@@ -1745,7 +1776,7 @@ ventana.state("zoomed")
 ventana.overrideredirect(True)
 ventana.configure(bg=COLOR_FONDO)
 
-# 👉 AQUÍ SE CREA EL LOGIN
+# AQUÍ SE CREA EL LOGIN
 crear_pantalla_login()
 
 # SEGURIDAD
@@ -1757,15 +1788,9 @@ ventana.bind_all("<Control-F4>", bloquear_alt_f4)
 
 # --- INICIALIZACIÓN ---
 
-# Verificar internet al iniciar
-if not verificar_internet():
-    # Mostrar aviso bloqueante si no hay internet
-    ventana.after(1000, mostrar_aviso_internet_bloqueante)
-else:
-    # Si hay internet, conectar normalmente
-    threading.Thread(target=conectar_google_sheets, daemon=True).start()
-
-threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
+# Verificar internet en segundo plano para no congelar el arranque
+ventana.after(300, iniciar_conexion_en_segundo_plano)
+ventana.after(5000, iniciar_verificacion_periodica)
 #ventana.after(1200, mostrar_instrucciones_iniciales, "")
 
 ventana.mainloop()
