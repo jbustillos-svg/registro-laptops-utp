@@ -1,6 +1,7 @@
 cachetools==6.2.4
 certifi==2025.11.12
 charset-normalizer==3.4.4
+comtypes
 google-auth==2.41.1
 google-auth-oauthlib==1.2.3
 gspread==6.2.1
@@ -9,7 +10,7 @@ idna==3.11
 oauth2client==4.1.3
 oauthlib==3.3.1
 pillow==12.0.0
-psutil==7.1.3
+pywifi
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pyparsing==3.2.5
