@@ -160,7 +160,9 @@ def intentar_actualizacion_recuperacion():
         )
 
     try:
-        estado = git(["status", "--porcelain"], 5)
+        estado = git(
+            ["status", "--porcelain", "--untracked-files=no"], 5
+        )
         if estado.returncode != 0 or estado.stdout.strip():
             return
         fetch = git(["fetch", "origin", "main", "--quiet"], 20)

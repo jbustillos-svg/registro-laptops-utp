@@ -58,12 +58,18 @@ def main():
     esperar_fin_proceso(pid_aplicacion)
 
     try:
-        estado = ejecutar_git(directorio, ["status", "--porcelain"])
+        estado = ejecutar_git(
+            directorio,
+            ["status", "--porcelain", "--untracked-files=no"]
+        )
         if estado.returncode != 0:
             registrar_log(directorio, "error comprobando cambios locales al aplicar")
             return
         if estado.stdout.strip():
-            registrar_log(directorio, "pendiente: existen cambios locales; no se aplicó")
+            registrar_log(
+                directorio,
+                "pendiente: existen cambios locales versionados; no se aplicó"
+            )
             return
 
         resultado = ejecutar_git(

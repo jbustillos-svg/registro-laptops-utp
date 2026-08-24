@@ -1616,7 +1616,7 @@ def comprobar_actualizacion_segundo_plano():
             return
 
         estado_local = ejecutar_git_segundo_plano(
-            ["status", "--porcelain"],
+            ["status", "--porcelain", "--untracked-files=no"],
             timeout=5
         )
         if estado_local.returncode != 0:
@@ -1624,7 +1624,7 @@ def comprobar_actualizacion_segundo_plano():
             return
         if estado_local.stdout.strip():
             registrar_log_actualizacion(
-                "nueva versión detectada; existen cambios locales y no se aplicará"
+                "nueva versión detectada; existen cambios locales versionados y no se aplicará"
             )
             return
 
