@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tkinter as tk
+import time
 
 
 DIRECTORIO_APP = Path(__file__).resolve().parent
@@ -18,17 +20,19 @@ RUTA_PYTHONW = RUTA_VENV / "Scripts" / "pythonw.exe"
 RUTA_REQUIREMENTS = DIRECTORIO_APP / "requirements..txt"
 RUTA_MARCADOR = DIRECTORIO_APP / ".requirements.sha256"
 RUTA_LOG = DIRECTORIO_APP / "bootstrap.log"
+RUTA_LOG_ARRANQUE = DIRECTORIO_APP / "arranque.log"
 RUTA_APLICACION = DIRECTORIO_APP / "registro_laptop.pyw"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def registrar(mensaje):
-    try:
-        with RUTA_LOG.open("a", encoding="utf-8") as archivo:
-            marca = datetime.now().isoformat(timespec="seconds")
-            archivo.write(f"[{marca}] {mensaje}\n")
-    except OSError:
-        pass
+    marca = datetime.now().isoformat(timespec="seconds")
+    for ruta_log in (RUTA_LOG, RUTA_LOG_ARRANQUE):
+        try:
+            with ruta_log.open("a", encoding="utf-8") as archivo:
+                archivo.write(f"[{marca}] {mensaje}\n")
+        except OSError:
+            pass
 
 
 class AvisoPreparacion:
@@ -78,6 +82,15 @@ class AvisoPreparacion:
         self.raiz.mainloop()
         self.raiz = None
 
+    def actualizar(self, mensaje):
+        if not self.raiz or not self.texto:
+            return
+        try:
+            self.texto.config(text=mensaje)
+            self.raiz.update()
+        except tk.TclError:
+            self.raiz = None
+
     def cerrar(self):
         if self.raiz:
             try:
@@ -102,6 +115,34 @@ def ejecutar(comando, timeout):
 
 def hash_requirements():
     return hashlib.sha256(RUTA_REQUIREMENTS.read_bytes()).hexdigest()
+
+
+def red_disponible(timeout=3):
+    try:
+        with socket.create_connection(("github.com", 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def esperar_red(aviso, intervalo=10):
+    registrar("red no disponible; esperando")
+    aviso.actualizar(
+        "Preparando el Sistema de Control de Laptops...\n\n"
+        "Esperando conexión a Internet. El sistema continuará automáticamente."
+    )
+    while not red_disponible():
+        for _ in range(intervalo):
+            time.sleep(1)
+            aviso.actualizar(
+                "Preparando el Sistema de Control de Laptops...\n\n"
+                "Esperando conexión a Internet. El sistema continuará automáticamente."
+            )
+    registrar("red disponible")
+    aviso.actualizar(
+        "Preparando el Sistema de Control de Laptops...\n\n"
+        "Este proceso se realiza únicamente cuando es necesario."
+    )
 
 
 def verificar_imports_entorno():
@@ -221,6 +262,7 @@ def preparar_entorno(hash_actual):
 
 def iniciar_aplicacion():
     try:
+        registrar("registro_laptop solicitado")
         subprocess.Popen(
             [str(RUTA_PYTHONW), str(RUTA_APLICACION)],
             cwd=str(DIRECTORIO_APP),
@@ -237,6 +279,7 @@ def iniciar_aplicacion():
 def main():
     aviso = None
     try:
+        registrar(f"bootstrap iniciado | ejecutable={sys.executable}")
         if not RUTA_REQUIREMENTS.exists() or not RUTA_APLICACION.exists():
             registrar("faltan archivos requeridos")
             aviso = AvisoPreparacion()
@@ -244,11 +287,46 @@ def main():
             return
 
         hash_actual = hash_requirements()
-        if not entorno_preparado(hash_actual):
+        if entorno_preparado(hash_actual):
+            registrar("venv válida")
+            registrar(
+                "red disponible" if red_disponible() else "red no disponible"
+            )
+        else:
+            registrar("venv no válida")
             aviso = AvisoPreparacion()
+            entorno_anterior_funcional = (
+                RUTA_PYTHON.exists()
+                and RUTA_PYTHONW.exists()
+                and verificar_imports_entorno()
+            )
+            if not red_disponible():
+                registrar("red no disponible")
+                if entorno_anterior_funcional:
+                    registrar("venv anterior funcional; se inicia sin actualizar")
+                    aviso.cerrar()
+                    iniciar_aplicacion()
+                    return
+                esperar_red(aviso)
+            else:
+                registrar("red disponible")
             intentar_actualizacion_recuperacion()
             hash_actual = hash_requirements()
-            preparado, entorno_utilizable = preparar_entorno(hash_actual)
+            preparado = False
+            entorno_utilizable = False
+            for intento in range(1, 4):
+                registrar(f"preparación de entorno intento={intento}")
+                preparado, entorno_utilizable = preparar_entorno(hash_actual)
+                if preparado or entorno_utilizable:
+                    break
+                if not red_disponible():
+                    esperar_red(aviso)
+                elif intento < 3:
+                    aviso.actualizar(
+                        "Preparando el Sistema de Control de Laptops...\n\n"
+                        "La preparación continuará automáticamente."
+                    )
+                    time.sleep(10)
             if not preparado and not entorno_utilizable:
                 aviso.error()
                 return
