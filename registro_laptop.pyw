@@ -35,8 +35,9 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.0"
-MODO_PRUEBA = True
+VERSION_SISTEMA = "1.3.1"
+MODO_PRUEBA = False
+PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -2425,12 +2426,27 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
         return
 
     if boton:
-        boton.config(state="disabled", text="Verificando ubicación...")
-        print("[DEVOLUCION] botón deshabilitado")
-        modal_progreso = crear_modal_verificacion_ubicacion(
-            ventana,
-            "Asegúrate de estar cerca del carrito para continuar con la devolución."
+        boton.config(
+            state="disabled",
+            text=(
+                "Verificando ubicación..."
+                if PROXIMIDAD_HABILITADA else "Verificando conexión..."
+            )
         )
+        print("[DEVOLUCION] botón deshabilitado")
+        if PROXIMIDAD_HABILITADA:
+            modal_progreso = crear_modal_verificacion_ubicacion(
+                ventana,
+                "Asegúrate de estar cerca del carrito para continuar con la devolución."
+            )
+        else:
+            modal_progreso = crear_modal_verificacion_ubicacion(
+                ventana,
+                "Estamos verificando la información y guardando la entrega del equipo. "
+                "Por favor, espera.",
+                titulo="Registrando devolución",
+                estado="Procesando..."
+            )
         print("[DEVOLUCION] modal creado")
         ventana_ubicacion, titulo_ubicacion, mensaje_ubicacion, estado_ubicacion = modal_progreso
         proximidad_visual_activa = {"valor": True}
@@ -2637,9 +2653,13 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 ventana, matricula, nombre, modal_progreso
             )
 
-    print("[DEVOLUCION] iniciando proximidad")
-    threading.Thread(target=comprobar_proximidad, daemon=True).start()
-    print("[DEVOLUCION] worker iniciado")
+    if PROXIMIDAD_HABILITADA:
+        print("[DEVOLUCION] iniciando proximidad")
+        threading.Thread(target=comprobar_proximidad, daemon=True).start()
+        print("[DEVOLUCION] worker iniciado")
+    else:
+        print("[DEVOLUCION] proximidad deshabilitada; verificando devolución")
+        threading.Thread(target=comprobar_devolucion, daemon=True).start()
     return
 
 
@@ -3353,6 +3373,14 @@ def iniciar_sesion():
             return
 
         alumno_confirmado["nombre"] = nombre
+        if not PROXIMIDAD_HABILITADA:
+            mostrar_confirmacion_simple(
+                alumno_confirmado["nombre"],
+                matricula,
+                identidad_confirmada=True
+            )
+            return
+
         (
             ventana_ubicacion,
             titulo_ubicacion,
@@ -3679,6 +3707,10 @@ def iniciar_verificacion_periodica():
 
 # --- VENTANA PRINCIPAL ---
 registrar_inicio_tecnico()
+registrar_evento_tecnico(
+    f"MODO_PRODUCCION={not MODO_PRUEBA} "
+    f"PROXIMIDAD_HABILITADA={PROXIMIDAD_HABILITADA}"
+)
 ventana = tk.Tk()
 ventana.bind_all("<Control-Alt-u>", manejar_atajo_administrativo)
 ventana.bind_all("<KeyPress>", registrar_actividad_usuario, add="+")
