@@ -1,6 +1,7 @@
 credenciales.json
 ENTORNO.txt
 .venv/
+.requirements.sha256
 __pycache__/
 *.log
 *.exe
