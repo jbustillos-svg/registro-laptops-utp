@@ -6,10 +6,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
+import secrets
 import socket
 import subprocess
 import sys
 import tkinter as tk
+from tkinter import ttk
+import threading
 import time
 
 
@@ -23,6 +27,7 @@ RUTA_LOG = DIRECTORIO_APP / "bootstrap.log"
 RUTA_LOG_ARRANQUE = DIRECTORIO_APP / "arranque.log"
 RUTA_APLICACION = DIRECTORIO_APP / "registro_laptop.pyw"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+TIEMPO_ESPERA_APP_LISTA = 120
 
 
 def registrar(mensaje):
@@ -39,65 +44,160 @@ class AvisoPreparacion:
     def __init__(self):
         self.raiz = None
         self.texto = None
+        self.barra = None
+        self.cola = queue.Queue()
+        self.error_definitivo = False
         try:
             self.raiz = tk.Tk()
             self.raiz.title("Sistema de Control de Laptops")
-            self.raiz.resizable(False, False)
             self.raiz.attributes("-topmost", True)
+            self.raiz.state("zoomed")
+            self.raiz.overrideredirect(True)
+            self.raiz.configure(bg="#0b1f3a")
+            self.raiz.protocol("WM_DELETE_WINDOW", self._cierre_bloqueado)
+            self.raiz.bind_all("<Alt-F4>", self._cierre_bloqueado)
+            self.raiz.bind("<Unmap>", self._restaurar_pantalla)
+            contenedor = tk.Frame(self.raiz, bg="#0b1f3a")
+            contenedor.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+            tk.Label(
+                contenedor,
+                text="SISTEMA DE CONTROL DE LAPTOPS",
+                font=("Segoe UI", 25, "bold"),
+                fg="white",
+                bg="#0b1f3a",
+            ).pack(pady=(0, 32))
             self.texto = tk.Label(
-                self.raiz,
-                text=(
-                    "Preparando el Sistema de Control de Laptops...\n\n"
-                    "Este proceso se realiza únicamente cuando es necesario."
-                ),
-                font=("Segoe UI", 11),
-                padx=32,
-                pady=28,
+                contenedor,
+                text="Cargando sistema...",
+                font=("Segoe UI", 14),
+                fg="#dce8f7",
+                bg="#0b1f3a",
                 justify=tk.CENTER,
             )
-            self.texto.pack()
-            self.raiz.update_idletasks()
-            ancho = self.raiz.winfo_reqwidth()
-            alto = self.raiz.winfo_reqheight()
-            x = (self.raiz.winfo_screenwidth() - ancho) // 2
-            y = (self.raiz.winfo_screenheight() - alto) // 2
-            self.raiz.geometry(f"{ancho}x{alto}+{x}+{y}")
-            self.raiz.update()
+            self.texto.pack(pady=(0, 24))
+            self.barra = ttk.Progressbar(
+                contenedor,
+                mode="indeterminate",
+                length=420,
+            )
+            self.barra.pack(pady=(0, 38))
+            self.barra.start(12)
+            acciones = tk.Frame(contenedor, bg="#0b1f3a")
+            acciones.pack()
+            estilo_boton = {
+                "font": ("Segoe UI", 11, "bold"),
+                "fg": "white",
+                "bg": "#244b75",
+                "activeforeground": "white",
+                "activebackground": "#326496",
+                "relief": tk.FLAT,
+                "width": 14,
+                "pady": 10,
+            }
+            tk.Button(
+                acciones,
+                text="APAGAR",
+                command=lambda: self._accion_windows("apagar"),
+                **estilo_boton,
+            ).pack(side=tk.LEFT, padx=10)
+            tk.Button(
+                acciones,
+                text="REINICIAR",
+                command=lambda: self._accion_windows("reiniciar"),
+                **estilo_boton,
+            ).pack(side=tk.LEFT, padx=10)
+            self.raiz.focus_force()
         except tk.TclError as error:
             registrar(f"aviso no disponible: {error}")
             self.raiz = None
 
     def error(self):
-        if not self.raiz or not self.texto:
-            return
-        self.texto.config(
-            text=(
-                "No fue posible preparar el sistema.\n\n"
-                "Verifica la conexión a Internet e intenta nuevamente."
-            )
-        )
-        boton = tk.Button(self.raiz, text="ENTENDIDO", command=self.raiz.destroy)
-        boton.pack(pady=(0, 20), ipadx=18, ipady=5)
-        self.raiz.update_idletasks()
-        self.raiz.mainloop()
-        self.raiz = None
+        self.cola.put(("error", None))
 
     def actualizar(self, mensaje):
-        if not self.raiz or not self.texto:
-            return
-        try:
-            self.texto.config(text=mensaje)
-            self.raiz.update()
-        except tk.TclError:
-            self.raiz = None
+        self.cola.put(("mensaje", mensaje))
 
     def cerrar(self):
+        self.cola.put(("cerrar", None))
+
+    def _cierre_bloqueado(self):
+        if self.texto:
+            self.texto.config(
+                text="El sistema todavía está iniciando..."
+            )
+        return "break"
+
+    def _restaurar_pantalla(self, _evento=None):
         if self.raiz:
-            try:
-                self.raiz.destroy()
-            except tk.TclError:
-                pass
-            self.raiz = None
+            self.raiz.after_idle(self._mostrar_al_frente)
+
+    def _mostrar_al_frente(self):
+        if not self.raiz:
+            return
+        try:
+            self.raiz.deiconify()
+            self.raiz.attributes("-topmost", True)
+            self.raiz.lift()
+            self.raiz.focus_force()
+        except tk.TclError:
+            pass
+
+    def _accion_windows(self, accion):
+        argumentos = ["shutdown", "/s" if accion == "apagar" else "/r", "/t", "0"]
+        registrar(f"acción solicitada: {accion}")
+        try:
+            subprocess.Popen(argumentos, creationflags=CREATE_NO_WINDOW)
+        except OSError as error:
+            registrar(f"error solicitando {accion}: {error}")
+            if self.texto:
+                self.texto.config(text="No fue posible completar la acción solicitada.")
+
+    def _destruir(self):
+        if not self.raiz:
+            return
+        try:
+            self.raiz.destroy()
+        except tk.TclError:
+            pass
+        self.raiz = None
+
+    def _mostrar_error(self):
+        if not self.raiz or not self.texto:
+            return
+        self.error_definitivo = True
+        if self.barra:
+            self.barra.stop()
+            self.barra.pack_forget()
+        self.texto.config(
+            text=(
+                "No fue posible iniciar el sistema.\n\n"
+                "Puedes apagar o reiniciar el equipo."
+            )
+        )
+
+    def _procesar_cola(self):
+        if not self.raiz:
+            return
+        try:
+            while True:
+                accion, valor = self.cola.get_nowait()
+                if accion == "mensaje" and self.texto:
+                    self.texto.config(text=valor)
+                elif accion == "error":
+                    self._mostrar_error()
+                elif accion == "cerrar":
+                    self._destruir()
+                    return
+        except queue.Empty:
+            pass
+        if self.raiz:
+            self.raiz.after(100, self._procesar_cola)
+
+    def ejecutar(self):
+        if not self.raiz:
+            return
+        self.raiz.after(50, self._procesar_cola)
+        self.raiz.mainloop()
 
 
 def ejecutar(comando, timeout):
@@ -127,22 +227,13 @@ def red_disponible(timeout=3):
 
 def esperar_red(aviso, intervalo=10):
     registrar("red no disponible; esperando")
-    aviso.actualizar(
-        "Preparando el Sistema de Control de Laptops...\n\n"
-        "Esperando conexión a Internet. El sistema continuará automáticamente."
-    )
+    aviso.actualizar("Esperando conexión...")
     while not red_disponible():
         for _ in range(intervalo):
             time.sleep(1)
-            aviso.actualizar(
-                "Preparando el Sistema de Control de Laptops...\n\n"
-                "Esperando conexión a Internet. El sistema continuará automáticamente."
-            )
+            aviso.actualizar("Esperando conexión...")
     registrar("red disponible")
-    aviso.actualizar(
-        "Preparando el Sistema de Control de Laptops...\n\n"
-        "Este proceso se realiza únicamente cuando es necesario."
-    )
+    aviso.actualizar("Preparando el Sistema de Control de Laptops...")
 
 
 def verificar_imports_entorno():
@@ -260,29 +351,65 @@ def preparar_entorno(hash_actual):
     return True, True
 
 
-def iniciar_aplicacion():
+def crear_senal_app_lista():
+    token = secrets.token_hex(16)
+    directorio_temporal = Path(os.environ.get("TEMP", str(DIRECTORIO_APP)))
+    ruta = directorio_temporal / f"registro_laptop_lista_{os.getpid()}_{token}.tmp"
+    try:
+        ruta.unlink(missing_ok=True)
+    except OSError as error:
+        registrar(f"no se pudo limpiar señal APP_LISTA nueva: {error}")
+    return ruta, token
+
+
+def iniciar_aplicacion(ruta_senal, token_senal):
     try:
         registrar("registro_laptop solicitado")
-        subprocess.Popen(
+        entorno = os.environ.copy()
+        entorno["REGISTRO_LAPTOP_APP_LISTA"] = str(ruta_senal)
+        entorno["REGISTRO_LAPTOP_APP_TOKEN"] = token_senal
+        proceso = subprocess.Popen(
             [str(RUTA_PYTHONW), str(RUTA_APLICACION)],
             cwd=str(DIRECTORIO_APP),
             close_fds=True,
             creationflags=CREATE_NO_WINDOW,
+            env=entorno,
         )
         registrar("aplicación iniciada")
-        return True
+        return proceso
     except OSError as error:
         registrar(f"error iniciando aplicación: {error}")
-        return False
+        return None
 
 
-def main():
-    aviso = None
+def esperar_app_lista(proceso, ruta_senal, token_senal, timeout=TIEMPO_ESPERA_APP_LISTA):
+    registrar(f"esperando APP_LISTA | timeout={timeout}s")
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        try:
+            if ruta_senal.read_text(encoding="ascii").strip() == token_senal:
+                registrar("APP_LISTA recibida")
+                return True
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            registrar(f"error leyendo APP_LISTA: {error}")
+        if proceso.poll() is not None:
+            registrar(
+                f"registro_laptop finalizó antes de APP_LISTA | codigo={proceso.returncode}"
+            )
+            return False
+        time.sleep(0.1)
+    registrar("timeout esperando APP_LISTA")
+    return False
+
+
+def ejecutar_preparacion(aviso):
+    """Realiza la preparación sin bloquear el hilo principal de Tkinter."""
     try:
-        registrar(f"bootstrap iniciado | ejecutable={sys.executable}")
+        registrar("worker iniciado")
         if not RUTA_REQUIREMENTS.exists() or not RUTA_APLICACION.exists():
             registrar("faltan archivos requeridos")
-            aviso = AvisoPreparacion()
             aviso.error()
             return
 
@@ -294,56 +421,85 @@ def main():
             )
         else:
             registrar("venv no válida")
-            aviso = AvisoPreparacion()
+            aviso.actualizar("Preparando el Sistema de Control de Laptops...")
             entorno_anterior_funcional = (
                 RUTA_PYTHON.exists()
                 and RUTA_PYTHONW.exists()
                 and verificar_imports_entorno()
             )
-            if not red_disponible():
+            hay_red = red_disponible()
+            if not hay_red:
                 registrar("red no disponible")
                 if entorno_anterior_funcional:
                     registrar("venv anterior funcional; se inicia sin actualizar")
-                    aviso.cerrar()
-                    iniciar_aplicacion()
-                    return
-                esperar_red(aviso)
+                else:
+                    esperar_red(aviso)
             else:
                 registrar("red disponible")
-            intentar_actualizacion_recuperacion()
-            hash_actual = hash_requirements()
-            preparado = False
-            entorno_utilizable = False
-            for intento in range(1, 4):
-                registrar(f"preparación de entorno intento={intento}")
-                preparado, entorno_utilizable = preparar_entorno(hash_actual)
-                if preparado or entorno_utilizable:
-                    break
-                if not red_disponible():
-                    esperar_red(aviso)
-                elif intento < 3:
-                    aviso.actualizar(
-                        "Preparando el Sistema de Control de Laptops...\n\n"
-                        "La preparación continuará automáticamente."
+            if not entorno_anterior_funcional or hay_red:
+                intentar_actualizacion_recuperacion()
+                hash_actual = hash_requirements()
+                preparado = False
+                entorno_utilizable = False
+                for intento in range(1, 4):
+                    registrar(f"preparación de entorno intento={intento}")
+                    preparado, entorno_utilizable = preparar_entorno(hash_actual)
+                    if preparado or entorno_utilizable:
+                        break
+                    if not red_disponible():
+                        esperar_red(aviso)
+                    elif intento < 3:
+                        aviso.actualizar(
+                            "Preparando el Sistema de Control de Laptops..."
+                        )
+                        time.sleep(10)
+                if not preparado and not entorno_utilizable:
+                    aviso.error()
+                    return
+                if not preparado:
+                    registrar(
+                        "se usará el entorno anterior tras fallo de actualización"
                     )
-                    time.sleep(10)
-            if not preparado and not entorno_utilizable:
-                aviso.error()
-                return
-            if not preparado:
-                registrar("se usará el entorno anterior tras fallo de actualización")
 
-        if aviso:
-            aviso.cerrar()
-        if not iniciar_aplicacion():
-            aviso = AvisoPreparacion()
+        registrar("preparación completada")
+        aviso.actualizar("Iniciando sistema...")
+        time.sleep(0.5)
+        ruta_senal, token_senal = crear_senal_app_lista()
+        proceso = iniciar_aplicacion(ruta_senal, token_senal)
+        if not proceso:
             aviso.error()
+            return
+        if not esperar_app_lista(proceso, ruta_senal, token_senal):
+            aviso.error()
+            return
+        registrar("bootstrap finalizado")
+        aviso.cerrar()
     except Exception as error:
         registrar(f"error inesperado: {type(error).__name__}: {error}")
-        if aviso:
-            aviso.error()
-        else:
-            AvisoPreparacion().error()
+        aviso.error()
+    finally:
+        if "ruta_senal" in locals():
+            try:
+                ruta_senal.unlink(missing_ok=True)
+            except OSError as error:
+                registrar(f"error eliminando APP_LISTA: {error}")
+
+
+def main():
+    registrar(f"bootstrap iniciado | ejecutable={sys.executable}")
+    aviso = AvisoPreparacion()
+    if not aviso.raiz:
+        ejecutar_preparacion(aviso)
+        return
+
+    worker = threading.Thread(
+        target=ejecutar_preparacion,
+        args=(aviso,),
+        name="PreparacionBootstrap",
+        daemon=False,
+    )
+    worker.start()
+    aviso.ejecutar()
 
 
 if __name__ == "__main__":

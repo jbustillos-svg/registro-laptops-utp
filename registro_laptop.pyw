@@ -35,7 +35,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.1"
+VERSION_SISTEMA = "1.3.2"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
@@ -3705,6 +3705,26 @@ def iniciar_conexion_en_segundo_plano():
 def iniciar_verificacion_periodica():
     threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
 
+
+def notificar_interfaz_lista():
+    """Confirma al bootstrap que la ventana principal ya procesa eventos."""
+    ruta_senal = os.environ.get("REGISTRO_LAPTOP_APP_LISTA")
+    token_senal = os.environ.get("REGISTRO_LAPTOP_APP_TOKEN")
+    if not ruta_senal or not token_senal:
+        return
+    ruta_temporal = f"{ruta_senal}.{os.getpid()}.tmp"
+    try:
+        with open(ruta_temporal, "w", encoding="ascii") as archivo:
+            archivo.write(token_senal)
+        os.replace(ruta_temporal, ruta_senal)
+        registrar_evento_tecnico("APP_LISTA enviada")
+    except OSError as error:
+        registrar_evento_tecnico(f"ERROR_APP_LISTA={type(error).__name__}: {error}")
+        try:
+            os.remove(ruta_temporal)
+        except OSError:
+            pass
+
 # --- VENTANA PRINCIPAL ---
 registrar_inicio_tecnico()
 registrar_evento_tecnico(
@@ -3737,6 +3757,7 @@ ventana.bind_all("<Control-F4>", bloquear_alt_f4)
 ventana.after(300, iniciar_conexion_en_segundo_plano)
 ventana.after(1800, iniciar_actualizacion_en_segundo_plano)
 ventana.after(5000, iniciar_verificacion_periodica)
+ventana.after_idle(notificar_interfaz_lista)
 #ventana.after(1200, mostrar_instrucciones_iniciales, "")
 
 ventana.mainloop()
