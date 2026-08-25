@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -99,6 +100,31 @@ class PruebasActualizacion(unittest.TestCase):
         self.assertEqual((self.laptop / "app.txt").read_text(), "v2\n")
         self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
 
+    def test_sin_marker_detecta_y_aplica_en_mismo_arranque(self):
+        aviso = AvisoFalso()
+        self.assertTrue(bootstrap.comprobar_actualizacion_arranque(aviso))
+        self.assertEqual((self.laptop / "app.txt").read_text(), "v2\n")
+        self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+        self.assertIn("Actualizando el Sistema de Control de Laptops...", aviso.mensajes)
+
+    def test_igual_a_origin_arranca_sin_marker(self):
+        git(self.laptop, "pull", "--ff-only")
+        inicio = time.monotonic()
+        self.assertTrue(bootstrap.comprobar_actualizacion_arranque(AvisoFalso()))
+        self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+        self.assertLess(time.monotonic() - inicio, 3)
+
+    def test_sin_marker_y_remoto_inaccesible_usa_version_local(self):
+        fallo = subprocess.CompletedProcess(["git", "fetch"], 1, "", "sin red")
+        with mock.patch.object(bootstrap, "ejecutar_git", return_value=fallo) as ejecutar:
+            self.assertTrue(bootstrap.comprobar_actualizacion_arranque(AvisoFalso()))
+        fetches = [
+            llamada for llamada in ejecutar.call_args_list
+            if llamada.args[0][0] == "fetch"
+        ]
+        self.assertEqual(len(fetches), bootstrap.INTENTOS_FETCH_RAPIDO)
+        self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+
     def test_untracked_no_bloquea(self):
         (self.laptop / "local.txt").write_text("local\n", encoding="utf-8")
         self._marcar()
@@ -147,6 +173,48 @@ class PruebasActualizacion(unittest.TestCase):
             self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(aviso))
         esperar.assert_called_once_with(aviso)
         self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+
+    def test_marker_tiene_prioridad_sobre_comprobacion_rapida(self):
+        self._marcar()
+        with mock.patch.object(bootstrap, "aplicar_actualizacion_pendiente", return_value=True) as aplicar:
+            self.assertTrue(bootstrap.comprobar_actualizacion_arranque(AvisoFalso()))
+        aplicar.assert_called_once()
+
+    def test_hash_requirements_solo_invalida_si_cambia(self):
+        requirements = self.laptop / "requirements..txt"
+        marcador = self.laptop / ".requirements.sha256"
+        python = self.laptop / "python.exe"
+        pythonw = self.laptop / "pythonw.exe"
+        requirements.write_text("requests==1\n", encoding="utf-8")
+        python.touch()
+        pythonw.touch()
+        with mock.patch.object(bootstrap, "RUTA_REQUIREMENTS", requirements), mock.patch.object(
+            bootstrap, "RUTA_MARCADOR", marcador
+        ), mock.patch.object(bootstrap, "RUTA_PYTHON", python), mock.patch.object(
+            bootstrap, "RUTA_PYTHONW", pythonw
+        ), mock.patch.object(bootstrap, "verificar_imports_entorno", return_value=True):
+            marcador.write_text(bootstrap.hash_requirements() + "\n", encoding="ascii")
+            self.assertTrue(bootstrap.entorno_preparado(bootstrap.hash_requirements()))
+            requirements.write_text("requests==2\n", encoding="utf-8")
+            self.assertFalse(bootstrap.entorno_preparado(bootstrap.hash_requirements()))
+
+    def test_app_lista_conserva_contrato(self):
+        señal = self.laptop / "app_lista.tmp"
+        señal.write_text("token", encoding="ascii")
+
+        class Proceso:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        self.assertTrue(bootstrap.esperar_app_lista(Proceso(), señal, "token", timeout=0.2))
+
+    def test_solo_bootstrap_contiene_merge(self):
+        raiz = Path(__file__).parent
+        self.assertIn('"merge", "--ff-only"', (raiz / "bootstrap_laptop.pyw").read_text(encoding="utf-8"))
+        self.assertNotIn('"merge"', (raiz / "actualizador_segundo_plano.pyw").read_text(encoding="utf-8"))
+        self.assertNotIn('"merge"', (raiz / "registro_laptop.pyw").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

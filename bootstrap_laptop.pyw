@@ -30,6 +30,8 @@ RUTA_LOG_ARRANQUE = DIRECTORIO_APP / "arranque.log"
 RUTA_APLICACION = DIRECTORIO_APP / "registro_laptop.pyw"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TIEMPO_ESPERA_APP_LISTA = 120
+TIMEOUT_FETCH_RAPIDO = 6
+INTENTOS_FETCH_RAPIDO = 2
 
 
 def registrar(mensaje):
@@ -271,6 +273,13 @@ def detalle_resultado(resultado):
     )[:500]
 
 
+def crear_marker_actualizacion(origen):
+    ruta_temporal = RUTA_ACTUALIZACION_PENDIENTE.with_suffix(".tmp")
+    ruta_temporal.write_text("pendiente\n", encoding="ascii")
+    ruta_temporal.replace(RUTA_ACTUALIZACION_PENDIENTE)
+    registrar(f"actualización marcada como pendiente | origen={origen}")
+
+
 def adoptar_actualizacion_legada():
     """Migra el origin/main ya descargado por las versiones 1.3.1/1.3.2."""
     if RUTA_ACTUALIZACION_PENDIENTE.exists():
@@ -285,15 +294,14 @@ def adoptar_actualizacion_legada():
             and int(pendientes.stdout.strip() or "0") > 0
             and avance.returncode == 0
         ):
-            RUTA_ACTUALIZACION_PENDIENTE.write_text("pendiente\n", encoding="ascii")
+            crear_marker_actualizacion("estado legado")
             registrar("estado legado preparado convertido a actualización pendiente")
     except (FileNotFoundError, ValueError, OSError, subprocess.TimeoutExpired):
         pass
 
 
-def aplicar_actualizacion_pendiente(aviso):
+def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
     """Aplica la actualización completa antes de permitir que arranque la app."""
-    adoptar_actualizacion_legada()
     if not RUTA_ACTUALIZACION_PENDIENTE.exists():
         return True
 
@@ -301,14 +309,17 @@ def aplicar_actualizacion_pendiente(aviso):
     registrar("actualización pendiente encontrada")
     try:
         with BloqueoActualizacion():
-            if not red_disponible():
-                esperar_red(aviso)
-                aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
+            if not fetch_realizado:
+                if not red_disponible():
+                    esperar_red(aviso)
+                    aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
 
-            fetch = ejecutar_git(["fetch", "origin", "main", "--quiet"], 30)
-            if fetch.returncode != 0:
-                registrar(f"actualización pendiente: fetch falló: {detalle_resultado(fetch)}")
-                return False
+                fetch = ejecutar_git(["fetch", "origin", "main", "--quiet"], 30)
+                if fetch.returncode != 0:
+                    registrar(
+                        f"actualización pendiente: fetch falló: {detalle_resultado(fetch)}"
+                    )
+                    return False
 
             estado = ejecutar_git(
                 ["status", "--porcelain", "--untracked-files=no"], 10
@@ -342,6 +353,64 @@ def aplicar_actualizacion_pendiente(aviso):
     except (FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         registrar(f"actualización pendiente no aplicada: {type(error).__name__}: {error}")
         return False
+
+
+def comprobar_actualizacion_arranque(aviso):
+    """Comprueba GitHub brevemente; un marker previo conserva prioridad estricta."""
+    inicio = time.monotonic()
+    if RUTA_ACTUALIZACION_PENDIENTE.exists():
+        registrar("comprobación de arranque: marker pendiente tiene prioridad")
+        return aplicar_actualizacion_pendiente(aviso)
+
+    fetch = None
+    for intento in range(1, INTENTOS_FETCH_RAPIDO + 1):
+        try:
+            fetch = ejecutar_git(
+                ["fetch", "origin", "main", "--quiet"], TIMEOUT_FETCH_RAPIDO
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as error:
+            registrar(
+                f"comprobación rápida intento={intento} no disponible: "
+                f"{type(error).__name__}: {error}"
+            )
+            fetch = None
+        if fetch is not None and fetch.returncode == 0:
+            break
+        if fetch is not None:
+            registrar(
+                f"comprobación rápida intento={intento} falló: {detalle_resultado(fetch)}"
+            )
+
+    if fetch is None or fetch.returncode != 0:
+        registrar(
+            f"comprobación rápida omitida; se usará versión local | "
+            f"duracion={time.monotonic() - inicio:.2f}s"
+        )
+        return True
+
+    try:
+        pendientes = ejecutar_git(["rev-list", "--count", "HEAD..origin/main"], 5)
+        cantidad = int(pendientes.stdout.strip() or "0") if pendientes.returncode == 0 else 0
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        registrar(f"no se pudo interpretar comprobación rápida: {error}")
+        return True
+
+    if cantidad == 0:
+        registrar(
+            f"comprobación rápida sin cambios | duracion={time.monotonic() - inicio:.2f}s"
+        )
+        return True
+
+    try:
+        crear_marker_actualizacion("comprobación de arranque")
+    except OSError as error:
+        registrar(f"no se pudo crear marker de actualización: {error}")
+        return False
+    registrar(
+        f"comprobación rápida encontró commits={cantidad} | "
+        f"duracion={time.monotonic() - inicio:.2f}s"
+    )
+    return aplicar_actualizacion_pendiente(aviso, fetch_realizado=True)
 
 
 def hash_requirements():
@@ -494,7 +563,7 @@ def ejecutar_preparacion(aviso):
     """Realiza la preparación sin bloquear el hilo principal de Tkinter."""
     try:
         registrar("worker iniciado")
-        if not aplicar_actualizacion_pendiente(aviso):
+        if not comprobar_actualizacion_arranque(aviso):
             aviso.error(
                 "No fue posible completar la actualización pendiente.\n\n"
                 "Puedes apagar o reiniciar el equipo."
