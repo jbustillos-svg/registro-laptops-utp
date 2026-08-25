@@ -22,6 +22,7 @@ from proximidad_carrito import (
     ESTADO_NO_DETECTADO,
     verificar_proximidad_carrito
 )
+from heartbeat_manager import iniciar_heartbeat_manager
 
 DIRECTORIO_APP = os.path.dirname(os.path.abspath(__file__))
 RUTA_CREDENCIALES = os.path.join(DIRECTORIO_APP, "credenciales.json")
@@ -35,7 +36,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.2"
+VERSION_SISTEMA = "1.3.3"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
@@ -1605,46 +1606,14 @@ def comprobar_actualizacion_segundo_plano():
             registrar_log_actualizacion("sin cambios")
             return
 
-        avance_rapido = ejecutar_git_segundo_plano(
-            ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
-            timeout=5
-        )
-        if avance_rapido.returncode != 0:
-            registrar_log_actualizacion(
-                "pendiente: la actualización no permite avance rápido"
-            )
-            return
-
-        estado_local = ejecutar_git_segundo_plano(
-            ["status", "--porcelain", "--untracked-files=no"],
-            timeout=5
-        )
-        if estado_local.returncode != 0:
-            registrar_log_actualizacion("error comprobando cambios locales")
-            return
-        if estado_local.stdout.strip():
-            registrar_log_actualizacion(
-                "nueva versión detectada; existen cambios locales versionados y no se aplicará"
-            )
-            return
-
         directorio = os.path.dirname(os.path.abspath(__file__))
-        ruta_ayudante = os.path.join(
-            directorio,
-            "actualizador_segundo_plano.pyw"
-        )
-        if not os.path.exists(ruta_ayudante):
-            registrar_log_actualizacion("error: falta el ayudante de actualización")
-            return
-
-        subprocess.Popen(
-            [sys.executable, ruta_ayudante, str(os.getpid()), directorio],
-            cwd=directorio,
-            close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
+        ruta_marker = os.path.join(directorio, ".actualizacion_pendiente")
+        ruta_temporal = ruta_marker + ".tmp"
+        with open(ruta_temporal, "w", encoding="ascii") as archivo:
+            archivo.write("pendiente\n")
+        os.replace(ruta_temporal, ruta_marker)
         registrar_log_actualizacion(
-            "nueva versión detectada; preparada para el siguiente inicio"
+            "nueva versión detectada; actualización marcada como pendiente"
         )
     except FileNotFoundError:
         registrar_log_actualizacion("error: Git no está disponible")
@@ -3757,6 +3726,12 @@ ventana.bind_all("<Control-F4>", bloquear_alt_f4)
 ventana.after(300, iniciar_conexion_en_segundo_plano)
 ventana.after(1800, iniciar_actualizacion_en_segundo_plano)
 ventana.after(5000, iniciar_verificacion_periodica)
+ventana.after(
+    600,
+    lambda: iniciar_heartbeat_manager(
+        DIRECTORIO_APP, VERSION_SISTEMA, registrar_evento_tecnico
+    )
+)
 ventana.after_idle(notificar_interfaz_lista)
 #ventana.after(1200, mostrar_instrucciones_iniciales, "")
 

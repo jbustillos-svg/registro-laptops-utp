@@ -1,7 +1,10 @@
 credenciales.json
+manager_config.json
 ENTORNO.txt
 .venv/
 .requirements.sha256
+.actualizacion_pendiente
+.actualizacion.lock
 __pycache__/
 *.log
 *.exe

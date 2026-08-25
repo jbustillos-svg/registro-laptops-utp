@@ -23,6 +23,8 @@ RUTA_PYTHON = RUTA_VENV / "Scripts" / "python.exe"
 RUTA_PYTHONW = RUTA_VENV / "Scripts" / "pythonw.exe"
 RUTA_REQUIREMENTS = DIRECTORIO_APP / "requirements..txt"
 RUTA_MARCADOR = DIRECTORIO_APP / ".requirements.sha256"
+RUTA_ACTUALIZACION_PENDIENTE = DIRECTORIO_APP / ".actualizacion_pendiente"
+RUTA_BLOQUEO_ACTUALIZACION = DIRECTORIO_APP / ".actualizacion.lock"
 RUTA_LOG = DIRECTORIO_APP / "bootstrap.log"
 RUTA_LOG_ARRANQUE = DIRECTORIO_APP / "arranque.log"
 RUTA_APLICACION = DIRECTORIO_APP / "registro_laptop.pyw"
@@ -111,8 +113,8 @@ class AvisoPreparacion:
             registrar(f"aviso no disponible: {error}")
             self.raiz = None
 
-    def error(self):
-        self.cola.put(("error", None))
+    def error(self, mensaje=None):
+        self.cola.put(("error", mensaje))
 
     def actualizar(self, mensaje):
         self.cola.put(("mensaje", mensaje))
@@ -161,7 +163,7 @@ class AvisoPreparacion:
             pass
         self.raiz = None
 
-    def _mostrar_error(self):
+    def _mostrar_error(self, mensaje=None):
         if not self.raiz or not self.texto:
             return
         self.error_definitivo = True
@@ -169,7 +171,7 @@ class AvisoPreparacion:
             self.barra.stop()
             self.barra.pack_forget()
         self.texto.config(
-            text=(
+            text=mensaje or (
                 "No fue posible iniciar el sistema.\n\n"
                 "Puedes apagar o reiniciar el equipo."
             )
@@ -184,7 +186,7 @@ class AvisoPreparacion:
                 if accion == "mensaje" and self.texto:
                     self.texto.config(text=valor)
                 elif accion == "error":
-                    self._mostrar_error()
+                    self._mostrar_error(valor)
                 elif accion == "cerrar":
                     self._destruir()
                     return
@@ -211,6 +213,135 @@ def ejecutar(comando, timeout):
         creationflags=CREATE_NO_WINDOW,
         check=False,
     )
+
+
+def ejecutar_git(argumentos, timeout=20):
+    entorno = os.environ.copy()
+    entorno["GIT_TERMINAL_PROMPT"] = "0"
+    entorno["GCM_INTERACTIVE"] = "Never"
+    return subprocess.run(
+        ["git", *argumentos],
+        cwd=str(DIRECTORIO_APP),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        env=entorno,
+        creationflags=CREATE_NO_WINDOW,
+        check=False,
+    )
+
+
+class BloqueoActualizacion:
+    """Bloqueo liberado por el SO incluso si el equipo se apaga abruptamente."""
+
+    def __init__(self):
+        self.archivo = None
+
+    def __enter__(self):
+        self.archivo = RUTA_BLOQUEO_ACTUALIZACION.open("a+b")
+        if self.archivo.seek(0, os.SEEK_END) == 0:
+            self.archivo.write(b"0")
+            self.archivo.flush()
+        try:
+            import msvcrt
+            self.archivo.seek(0)
+            msvcrt.locking(self.archivo.fileno(), msvcrt.LK_NBLCK, 1)
+        except (ImportError, OSError):
+            self.archivo.close()
+            self.archivo = None
+            raise RuntimeError("otra actualización ya está en curso")
+        return self
+
+    def __exit__(self, *_args):
+        if self.archivo:
+            try:
+                import msvcrt
+                self.archivo.seek(0)
+                msvcrt.locking(self.archivo.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                self.archivo.close()
+
+
+def detalle_resultado(resultado):
+    return " ".join(
+        (resultado.stderr or resultado.stdout or "error desconocido").split()
+    )[:500]
+
+
+def adoptar_actualizacion_legada():
+    """Migra el origin/main ya descargado por las versiones 1.3.1/1.3.2."""
+    if RUTA_ACTUALIZACION_PENDIENTE.exists():
+        return
+    try:
+        pendientes = ejecutar_git(["rev-list", "--count", "HEAD..origin/main"], 5)
+        avance = ejecutar_git(
+            ["merge-base", "--is-ancestor", "HEAD", "origin/main"], 5
+        )
+        if (
+            pendientes.returncode == 0
+            and int(pendientes.stdout.strip() or "0") > 0
+            and avance.returncode == 0
+        ):
+            RUTA_ACTUALIZACION_PENDIENTE.write_text("pendiente\n", encoding="ascii")
+            registrar("estado legado preparado convertido a actualización pendiente")
+    except (FileNotFoundError, ValueError, OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def aplicar_actualizacion_pendiente(aviso):
+    """Aplica la actualización completa antes de permitir que arranque la app."""
+    adoptar_actualizacion_legada()
+    if not RUTA_ACTUALIZACION_PENDIENTE.exists():
+        return True
+
+    aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
+    registrar("actualización pendiente encontrada")
+    try:
+        with BloqueoActualizacion():
+            if not red_disponible():
+                esperar_red(aviso)
+                aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
+
+            fetch = ejecutar_git(["fetch", "origin", "main", "--quiet"], 30)
+            if fetch.returncode != 0:
+                registrar(f"actualización pendiente: fetch falló: {detalle_resultado(fetch)}")
+                return False
+
+            estado = ejecutar_git(
+                ["status", "--porcelain", "--untracked-files=no"], 10
+            )
+            if estado.returncode != 0:
+                registrar(f"actualización pendiente: status falló: {detalle_resultado(estado)}")
+                return False
+            if estado.stdout.strip():
+                registrar(
+                    "actualización bloqueada por cambios tracked: "
+                    + " | ".join(estado.stdout.splitlines())[:1000]
+                )
+                return False
+
+            avance = ejecutar_git(
+                ["merge-base", "--is-ancestor", "HEAD", "origin/main"], 10
+            )
+            if avance.returncode != 0:
+                registrar("actualización bloqueada: origin/main no permite fast-forward")
+                return False
+
+            merge = ejecutar_git(["merge", "--ff-only", "origin/main"], 30)
+            if merge.returncode != 0:
+                registrar(f"actualización pendiente: merge falló: {detalle_resultado(merge)}")
+                return False
+
+            RUTA_ACTUALIZACION_PENDIENTE.unlink()
+            registrar("actualización pendiente aplicada; marker eliminado")
+            aviso.actualizar("Preparando sistema...")
+            return True
+    except (FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        registrar(f"actualización pendiente no aplicada: {type(error).__name__}: {error}")
+        return False
 
 
 def hash_requirements():
@@ -268,51 +399,6 @@ def entorno_preparado(hash_actual):
     except OSError:
         return False
     return marcador_valido and verificar_imports_entorno()
-
-
-def intentar_actualizacion_recuperacion():
-    """Actualiza solo un árbol limpio cuando el entorno necesita preparación."""
-    entorno = os.environ.copy()
-    entorno["GIT_TERMINAL_PROMPT"] = "0"
-    entorno["GCM_INTERACTIVE"] = "Never"
-
-    def git(argumentos, timeout):
-        return subprocess.run(
-            ["git", *argumentos],
-            cwd=str(DIRECTORIO_APP),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=entorno,
-            creationflags=CREATE_NO_WINDOW,
-            check=False,
-        )
-
-    try:
-        estado = git(
-            ["status", "--porcelain", "--untracked-files=no"], 5
-        )
-        if estado.returncode != 0 or estado.stdout.strip():
-            return
-        fetch = git(["fetch", "origin", "main", "--quiet"], 20)
-        if fetch.returncode != 0:
-            registrar("recuperación Git no disponible")
-            return
-        avance = git(["merge-base", "--is-ancestor", "HEAD", "origin/main"], 5)
-        if avance.returncode != 0:
-            registrar("recuperación Git omitida: no es avance rápido")
-            return
-        merge = git(["merge", "--ff-only", "origin/main"], 15)
-        registrar(
-            "recuperación Git aplicada"
-            if merge.returncode == 0
-            else "recuperación Git no aplicada"
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
-        registrar(f"recuperación Git omitida: {error}")
 
 
 def preparar_entorno(hash_actual):
@@ -408,6 +494,12 @@ def ejecutar_preparacion(aviso):
     """Realiza la preparación sin bloquear el hilo principal de Tkinter."""
     try:
         registrar("worker iniciado")
+        if not aplicar_actualizacion_pendiente(aviso):
+            aviso.error(
+                "No fue posible completar la actualización pendiente.\n\n"
+                "Puedes apagar o reiniciar el equipo."
+            )
+            return
         if not RUTA_REQUIREMENTS.exists() or not RUTA_APLICACION.exists():
             registrar("faltan archivos requeridos")
             aviso.error()
@@ -437,7 +529,6 @@ def ejecutar_preparacion(aviso):
             else:
                 registrar("red disponible")
             if not entorno_anterior_funcional or hay_red:
-                intentar_actualizacion_recuperacion()
                 hash_actual = hash_requirements()
                 preparado = False
                 entorno_utilizable = False
