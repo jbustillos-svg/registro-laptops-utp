@@ -23,6 +23,11 @@ from proximidad_carrito import (
     verificar_proximidad_carrito
 )
 from heartbeat_manager import iniciar_heartbeat_manager
+from identidad_roles import (
+    normalizar_rol,
+    rol_requiere_curp,
+    seleccionar_flujo_identidad,
+)
 
 DIRECTORIO_APP = os.path.dirname(os.path.abspath(__file__))
 RUTA_CREDENCIALES = os.path.join(DIRECTORIO_APP, "credenciales.json")
@@ -36,7 +41,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.4"
+VERSION_SISTEMA = "1.3.5"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
@@ -1901,6 +1906,26 @@ def buscar_rol(matricula):
         return "ALUMNO"
 
 
+def consultar_datos_identidad(matricula):
+    """Lee el rol y, solo para alumnos, la CURP desde la misma fila."""
+    try:
+        if hoja_alumnos is None:
+            raise ErrorConsultaGoogle("La hoja Alumnos no está disponible")
+
+        matriculas = hoja_alumnos.col_values(1)
+        if matricula not in matriculas:
+            return None, None
+
+        fila = matriculas.index(matricula) + 1
+        rol = normalizar_rol(hoja_alumnos.cell(fila, 3).value)
+        curp = hoja_alumnos.cell(fila, 4).value if rol_requiere_curp(rol) else None
+        return rol, curp
+    except ErrorConsultaGoogle:
+        raise
+    except Exception as error:
+        raise ErrorConsultaGoogle("No se pudo consultar la identidad") from error
+
+
 def buscar_curp(matricula):
     """
     Obtiene la CURP completa desde Google Sheets
@@ -2891,17 +2916,63 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         threading.Thread(target=consultar_identidad, daemon=True).start()
 
     def consultar_identidad():
-        curp_real = buscar_curp(matricula)
-        ejecutar_en_ui(procesar_identidad, curp_real)
+        try:
+            rol, curp_real = consultar_datos_identidad(matricula)
+            if rol is None:
+                registrar_evento_tecnico(
+                    f"IDENTIDAD matricula={matricula} resultado=NO_ENCONTRADA"
+                )
+                ejecutar_en_ui(procesar_identidad, "no_encontrada", None, None)
+                return
+            flujo = seleccionar_flujo_identidad(rol)
+            registrar_evento_tecnico(
+                f"IDENTIDAD matricula={matricula} encontrada=SI "
+                f"rol={rol} flujo={flujo} "
+                f"curp={'CORRESPONDE' if rol_requiere_curp(rol) else 'OMITIDA_POR_ROL'}"
+            )
+            ejecutar_en_ui(procesar_identidad, "ok", rol, curp_real)
+        except ErrorConsultaGoogle as error:
+            causa = error.__cause__ or error
+            registrar_evento_tecnico(
+                f"IDENTIDAD matricula={matricula} error_consulta="
+                f"{type(causa).__name__}: {causa}"
+            )
+            ejecutar_en_ui(procesar_identidad, "error_consulta", None, None)
 
-    def procesar_identidad(curp_real):
+    def procesar_identidad(resultado, rol, curp_real):
         def cancelar_validacion_curp():
             cancelar_timeout_inactividad()
             reiniciar_estado_sistema()
             entrada.delete(0, tk.END)
             entrada.focus_set()
 
+        if resultado == "error_consulta":
+            mostrar_error(
+                "No se pudo verificar la información",
+                "No fue posible verificar la conexión. Intenta nuevamente."
+            )
+            cancelar_validacion_curp()
+            return
+
+        if resultado == "no_encontrada":
+            mostrar_error(
+                "Matrícula no válida",
+                "La matrícula no está registrada.\n\nVerifica o contacta al administrador."
+            )
+            cancelar_validacion_curp()
+            return
+
+        if not rol_requiere_curp(rol):
+            registrar_evento_tecnico(
+                f"IDENTIDAD matricula={matricula} rol={rol} CURP_OMITIDA_POR_ROL"
+            )
+            continuar_despues_identidad()
+            return
+
         if not curp_real:
+            registrar_evento_tecnico(
+                f"IDENTIDAD matricula={matricula} rol={rol} CURP_ALUMNO_VACIA"
+            )
             mostrar_error(
                 "Error",
                 "No se pudo validar la identidad.\nContacta al administrador."
@@ -2944,6 +3015,12 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             cancelar_validacion_curp()
             return
 
+        registrar_evento_tecnico(
+            f"IDENTIDAD matricula={matricula} rol={rol} CURP_VALIDADA"
+        )
+        continuar_despues_identidad()
+
+    def continuar_despues_identidad():
         cancelar_timeout_inactividad()
         cambiar_estado("Consultando registros...", COLOR_ADVERTENCIA)
         threading.Thread(target=consultar_control, daemon=True).start()
@@ -3329,6 +3406,9 @@ def iniciar_sesion():
             reiniciar_estado_sistema()
             return
 
+        registrar_evento_tecnico(
+            f"IDENTIDAD matricula={matricula} encontrada=SI etapa=NOMBRE"
+        )
         activar_timeout_inactividad()
         confirmado = mostrar_confirmacion_personalizada(
             "Confirmación",
