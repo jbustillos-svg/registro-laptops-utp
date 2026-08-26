@@ -105,7 +105,7 @@ class PruebasActualizacion(unittest.TestCase):
         self.assertTrue(bootstrap.comprobar_actualizacion_arranque(aviso))
         self.assertEqual((self.laptop / "app.txt").read_text(), "v2\n")
         self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
-        self.assertIn("Actualizando el Sistema de Control de Laptops...", aviso.mensajes)
+        self.assertIn("Actualizando sistema...", aviso.mensajes)
 
     def test_igual_a_origin_arranca_sin_marker(self):
         git(self.laptop, "pull", "--ff-only")

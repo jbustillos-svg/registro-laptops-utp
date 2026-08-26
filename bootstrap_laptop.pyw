@@ -49,6 +49,7 @@ class AvisoPreparacion:
         self.raiz = None
         self.texto = None
         self.barra = None
+        self.logo = None
         self.cola = queue.Queue()
         self.error_definitivo = False
         try:
@@ -57,46 +58,114 @@ class AvisoPreparacion:
             self.raiz.attributes("-topmost", True)
             self.raiz.state("zoomed")
             self.raiz.overrideredirect(True)
-            self.raiz.configure(bg="#0b1f3a")
+            color_fondo = "#07182d"
+            color_panel = "#0d2948"
+            color_primario = "#19a974"
+            color_texto = "#f7fafc"
+            color_secundario = "#c9d8e8"
+            self.raiz.configure(bg=color_fondo)
             self.raiz.protocol("WM_DELETE_WINDOW", self._cierre_bloqueado)
             self.raiz.bind_all("<Alt-F4>", self._cierre_bloqueado)
             self.raiz.bind("<Unmap>", self._restaurar_pantalla)
-            contenedor = tk.Frame(self.raiz, bg="#0b1f3a")
-            contenedor.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+            contenedor = tk.Frame(
+                self.raiz,
+                bg=color_panel,
+                padx=70,
+                pady=42,
+                highlightbackground="#173f66",
+                highlightthickness=1,
+            )
+            contenedor.place(
+                relx=0.5,
+                rely=0.5,
+                anchor=tk.CENTER,
+                relwidth=0.82,
+            )
+
+            tk.Frame(contenedor, bg=color_primario, height=5).pack(
+                fill=tk.X,
+                pady=(0, 28),
+            )
+
+            ruta_logo = DIRECTORIO_APP / "UTP.png"
+            if ruta_logo.exists():
+                self.logo = tk.PhotoImage(file=str(ruta_logo))
+                factor = max(
+                    1,
+                    (self.logo.width() + 259) // 260,
+                    (self.logo.height() + 179) // 180,
+                )
+                if factor > 1:
+                    self.logo = self.logo.subsample(factor, factor)
+                tk.Label(
+                    contenedor,
+                    image=self.logo,
+                    bg=color_panel,
+                    borderwidth=0,
+                ).pack(pady=(0, 22))
+
+            tk.Label(
+                contenedor,
+                text="UTP - UNIDAD ACADÉMICA RÍO BALLEZA",
+                font=("Segoe UI", 28, "bold"),
+                fg=color_texto,
+                bg=color_panel,
+                justify=tk.CENTER,
+                wraplength=900,
+            ).pack(fill=tk.X, pady=(0, 14))
+
             tk.Label(
                 contenedor,
                 text="SISTEMA DE CONTROL DE LAPTOPS",
-                font=("Segoe UI", 25, "bold"),
-                fg="white",
-                bg="#0b1f3a",
-            ).pack(pady=(0, 32))
+                font=("Segoe UI", 12, "bold"),
+                fg=color_primario,
+                bg=color_panel,
+            ).pack(pady=(0, 28))
+
             self.texto = tk.Label(
                 contenedor,
                 text="Cargando sistema...",
                 font=("Segoe UI", 14),
-                fg="#dce8f7",
-                bg="#0b1f3a",
+                fg=color_secundario,
+                bg=color_panel,
                 justify=tk.CENTER,
+                wraplength=760,
             )
-            self.texto.pack(pady=(0, 24))
+            self.texto.pack(fill=tk.X, pady=(0, 18))
+
+            estilo_progreso = ttk.Style(self.raiz)
+            estilo_progreso.configure(
+                "Institucional.Horizontal.TProgressbar",
+                troughcolor="#061426",
+                background=color_primario,
+                bordercolor="#061426",
+                lightcolor=color_primario,
+                darkcolor=color_primario,
+                thickness=10,
+            )
             self.barra = ttk.Progressbar(
                 contenedor,
                 mode="indeterminate",
-                length=420,
+                length=520,
+                style="Institucional.Horizontal.TProgressbar",
             )
-            self.barra.pack(pady=(0, 38))
+            self.barra.pack(pady=(0, 34))
             self.barra.start(12)
-            acciones = tk.Frame(contenedor, bg="#0b1f3a")
+
+            acciones = tk.Frame(contenedor, bg=color_panel)
             acciones.pack()
             estilo_boton = {
                 "font": ("Segoe UI", 11, "bold"),
-                "fg": "white",
-                "bg": "#244b75",
-                "activeforeground": "white",
-                "activebackground": "#326496",
+                "fg": color_texto,
+                "bg": "#173f66",
+                "activeforeground": color_texto,
+                "activebackground": "#205984",
                 "relief": tk.FLAT,
                 "width": 14,
                 "pady": 10,
+                "cursor": "hand2",
+                "borderwidth": 0,
             }
             tk.Button(
                 acciones,
@@ -305,14 +374,14 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
     if not RUTA_ACTUALIZACION_PENDIENTE.exists():
         return True
 
-    aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
+    aviso.actualizar("Actualizando sistema...")
     registrar("actualización pendiente encontrada")
     try:
         with BloqueoActualizacion():
             if not fetch_realizado:
                 if not red_disponible():
                     esperar_red(aviso)
-                    aviso.actualizar("Actualizando el Sistema de Control de Laptops...")
+                    aviso.actualizar("Actualizando sistema...")
 
                 fetch = ejecutar_git(["fetch", "origin", "main", "--quiet"], 30)
                 if fetch.returncode != 0:
@@ -433,7 +502,7 @@ def esperar_red(aviso, intervalo=10):
             time.sleep(1)
             aviso.actualizar("Esperando conexión...")
     registrar("red disponible")
-    aviso.actualizar("Preparando el Sistema de Control de Laptops...")
+    aviso.actualizar("Preparando sistema...")
 
 
 def verificar_imports_entorno():
@@ -582,7 +651,7 @@ def ejecutar_preparacion(aviso):
             )
         else:
             registrar("venv no válida")
-            aviso.actualizar("Preparando el Sistema de Control de Laptops...")
+            aviso.actualizar("Preparando sistema...")
             entorno_anterior_funcional = (
                 RUTA_PYTHON.exists()
                 and RUTA_PYTHONW.exists()
@@ -610,7 +679,7 @@ def ejecutar_preparacion(aviso):
                         esperar_red(aviso)
                     elif intento < 3:
                         aviso.actualizar(
-                            "Preparando el Sistema de Control de Laptops..."
+                            "Preparando sistema..."
                         )
                         time.sleep(10)
                 if not preparado and not entorno_utilizable:
