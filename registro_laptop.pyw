@@ -41,9 +41,9 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.7"
+VERSION_SISTEMA = "1.3.8"
 MODO_PRUEBA = False
-PROXIMIDAD_HABILITADA = False
+PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
 hoja_registros = None
 zona_horaria = pytz.timezone("America/Chihuahua")
@@ -91,6 +91,37 @@ def registrar_evento_tecnico(evento):
             )
     except OSError:
         pass
+
+
+def limpiar_logs_antiguos(dias=7):
+    """Elimina archivos .log antiguos ubicados directamente en DIRECTORIO_APP."""
+    eliminados = 0
+    limite_segundos = dias * 24 * 60 * 60
+    ahora = time.time()
+
+    try:
+        with os.scandir(DIRECTORIO_APP) as entradas:
+            for entrada in entradas:
+                try:
+                    if not entrada.is_file(follow_symlinks=False):
+                        continue
+                    if not entrada.name.lower().endswith(".log"):
+                        continue
+                    if ahora - entrada.stat(follow_symlinks=False).st_mtime <= limite_segundos:
+                        continue
+                    os.remove(entrada.path)
+                    eliminados += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    registrar_evento_tecnico(f"LIMPIEZA_LOGS eliminados={eliminados}")
+    return eliminados
+
+
+def iniciar_limpieza_logs():
+    threading.Thread(target=limpiar_logs_antiguos, daemon=True).start()
 
 
 def registrar_inicio_tecnico():
@@ -3803,6 +3834,7 @@ ventana.bind_all("<Control-F4>", bloquear_alt_f4)
 # --- INICIALIZACIÓN ---
 
 # Verificar internet en segundo plano para no congelar el arranque
+ventana.after(100, iniciar_limpieza_logs)
 ventana.after(300, iniciar_conexion_en_segundo_plano)
 ventana.after(1800, iniciar_actualizacion_en_segundo_plano)
 ventana.after(5000, iniciar_verificacion_periodica)
