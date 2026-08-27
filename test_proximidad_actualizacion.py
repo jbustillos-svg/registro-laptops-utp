@@ -26,6 +26,8 @@ class PruebasActualizacionProximidad(unittest.TestCase):
 
     def test_proximidad_esta_habilitada(self):
         self.assertIs(self.asignacion("PROXIMIDAD_HABILITADA"), True)
+        self.assertIs(self.asignacion("MODO_PRUEBA"), False)
+        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.3.8")
 
     def test_prestamo_confirma_nombre_luego_proximidad_y_luego_identidad(self):
         confirmar = self.fuente.index("confirmado = mostrar_confirmacion_personalizada")
@@ -50,19 +52,38 @@ class PruebasActualizacionProximidad(unittest.TestCase):
         self.assertIn("No se confirmó Hora_Salida", self.fuente)
         self.assertGreater(apagado, 0)
 
-    def test_cerca_continua_y_lejos_bloquea(self):
-        with mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
-                mock.patch.object(proximidad, "_obtener_rssi", return_value=-60):
-            self.assertEqual(
-                proximidad.verificar_proximidad_carrito(),
-                (True, proximidad.ESTADO_CERCA),
-            )
-        with mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
-                mock.patch.object(proximidad, "_obtener_rssi", return_value=-75):
-            self.assertEqual(
-                proximidad.verificar_proximidad_carrito(),
-                (False, proximidad.ESTADO_LEJOS),
-            )
+    def test_cerca_continua_en_el_nuevo_umbral(self):
+        for lectura in (-60, -66, -67):
+            with self.subTest(lectura=lectura), \
+                    mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
+                    mock.patch.object(proximidad, "_obtener_rssi", return_value=lectura):
+                self.assertEqual(
+                    proximidad.verificar_proximidad_carrito(),
+                    (True, proximidad.ESTADO_CERCA),
+                )
+
+    def test_zona_dudosa_conserva_relecturas_y_confirmacion(self):
+        casos = (
+            ((-68, -69, -70), (True, proximidad.ESTADO_CERCA)),
+            ((-70, -70, -70), (True, proximidad.ESTADO_CERCA)),
+            ((-70, -71, -72), (False, proximidad.ESTADO_LEJOS)),
+        )
+        for lecturas, esperado in casos:
+            with self.subTest(lecturas=lecturas), \
+                    mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
+                    mock.patch.object(proximidad, "_obtener_rssi", side_effect=lecturas) as obtener:
+                self.assertEqual(proximidad.verificar_proximidad_carrito(), esperado)
+                self.assertEqual(obtener.call_count, proximidad.MAX_INTENTOS)
+
+    def test_menos_73_es_lejos_inmediato(self):
+        for lectura in (-73, -75):
+            with self.subTest(lectura=lectura), \
+                    mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
+                    mock.patch.object(proximidad, "_obtener_rssi", return_value=lectura):
+                self.assertEqual(
+                    proximidad.verificar_proximidad_carrito(),
+                    (False, proximidad.ESTADO_LEJOS),
+                )
 
     def test_no_detectado_y_error_conservan_estados_de_contingencia(self):
         with mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
@@ -81,12 +102,12 @@ class PruebasActualizacionProximidad(unittest.TestCase):
         self.assertIn("ESTADO_ERROR", bloque)
         self.assertIn("iniciar_contexto_contingencia", bloque)
 
-    def test_ssid_bssid_rssi_y_umbrales_no_cambiaron(self):
+    def test_ssid_bssid_y_nuevos_umbrales(self):
         self.assertEqual(proximidad.SSID_CARRITO, "UARB-SYS-01")
         self.assertEqual(proximidad.BSSID_CARRITO, "b8:27:eb:76:e2:f5")
-        self.assertEqual(proximidad.UMBRAL_CERCA_SEGURO, -64)
-        self.assertEqual(proximidad.UMBRAL_LEJOS_SEGURO, -70)
-        self.assertEqual(proximidad.UMBRAL_CONFIRMACION, -67)
+        self.assertEqual(proximidad.UMBRAL_CERCA_SEGURO, -67)
+        self.assertEqual(proximidad.UMBRAL_LEJOS_SEGURO, -73)
+        self.assertEqual(proximidad.UMBRAL_CONFIRMACION, -70)
 
 
 if __name__ == "__main__":
