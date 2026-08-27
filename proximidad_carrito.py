@@ -7,14 +7,12 @@ import pywifi
 SSID_CARRITO = "UARB-SYS-01"
 BSSID_CARRITO = "b8:27:eb:76:e2:f5"
 
-UMBRAL_CERCA_SEGURO = -67
-UMBRAL_LEJOS_SEGURO = -73
-UMBRAL_CONFIRMACION = -70
+UMBRAL_CERCA_SEGURO = -69
+UMBRAL_LEJOS_SEGURO = -75
+UMBRAL_CONFIRMACION = -72
 
-ESPERA_PRIMERA_CONSULTA = 0.35
-ESPERA_SEGUNDA_CONSULTA = 0.30
-ESPERA_TERCERA_CONSULTA = 0.25
-MAX_INTENTOS = 3
+ESPERA_RESULTADOS_SCAN = 0.80
+MAX_INTENTOS = 5
 
 ESTADO_CERCA = "CERCA"
 ESTADO_LEJOS = "LEJOS"
@@ -57,36 +55,31 @@ def _obtener_rssi(iface):
     iface.scan()
     print("[SCAN] Solicitud enviada")
 
-    time.sleep(ESPERA_PRIMERA_CONSULTA)
-    primera = _extraer_rssi(iface.scan_results())
-    print(f"[SCAN] +{time.perf_counter() - inicio_scan:.2f} s -> RSSI {primera}")
-
-    time.sleep(ESPERA_SEGUNDA_CONSULTA)
-    segunda = _extraer_rssi(iface.scan_results())
-    print(f"[SCAN] +{time.perf_counter() - inicio_scan:.2f} s -> RSSI {segunda}")
-
-    if segunda is not None and (
-        segunda >= UMBRAL_CERCA_SEGURO or segunda <= UMBRAL_LEJOS_SEGURO
-    ):
-        print(f"[SCAN] Lectura seleccionada: {segunda}")
-        return segunda
-
-    time.sleep(ESPERA_TERCERA_CONSULTA)
-    tercera = _extraer_rssi(iface.scan_results())
-    print(f"[SCAN] +{time.perf_counter() - inicio_scan:.2f} s -> RSSI {tercera}")
-
-    seleccionada = tercera if tercera is not None else segunda
-    print(f"[SCAN] Lectura seleccionada: {seleccionada}")
-    return seleccionada
+    time.sleep(ESPERA_RESULTADOS_SCAN)
+    lectura = _extraer_rssi(iface.scan_results())
+    print(f"[SCAN] +{time.perf_counter() - inicio_scan:.2f} s -> RSSI {lectura}")
+    return lectura
 
 
-def verificar_proximidad_carrito(mostrar_detalles=False, callback_intento=None):
+def verificar_proximidad_carrito(
+    mostrar_detalles=False,
+    callback_intento=None,
+    callback_evento=None,
+):
     inicio = time.perf_counter()
 
     def finalizar(resultado, estado, descripcion):
         print(f"[PROXIMIDAD] Resultado: {descripcion}")
         print(f"[PROXIMIDAD] Tiempo total: {time.perf_counter() - inicio:.2f} s")
         return resultado, estado
+
+    def registrar(evento):
+        print(f"[PROXIMIDAD] {evento}")
+        if callback_evento:
+            try:
+                callback_evento(f"PROXIMIDAD {evento}")
+            except Exception as error_callback:
+                print(f"[PROXIMIDAD] Error registrando evento: {error_callback}")
 
     try:
         iface = _obtener_interfaz_wifi()
@@ -108,17 +101,27 @@ def verificar_proximidad_carrito(mostrar_detalles=False, callback_intento=None):
                 lectura = _obtener_rssi(iface)
             except Exception as error:
                 intentos_con_error += 1
-                print(f"[PROXIMIDAD] Error intento {intento}: {error}")
+                registrar(
+                    f"intento={intento}/{MAX_INTENTOS} escaneo=nuevo "
+                    f"resultado=ERROR detalle={type(error).__name__}"
+                )
                 if mostrar_detalles:
                     import traceback
                     traceback.print_exc()
                 continue
 
             if lectura is None:
-                print(f"[PROXIMIDAD] Intento {intento} sin SSID/BSSID válido")
+                registrar(
+                    f"intento={intento}/{MAX_INTENTOS} escaneo=nuevo "
+                    "resultado=NO_DETECTADO"
+                )
                 continue
 
             lecturas.append(lectura)
+            registrar(
+                f"intento={intento}/{MAX_INTENTOS} escaneo=nuevo "
+                f"BSSID={BSSID_CARRITO} RSSI={lectura}"
+            )
 
             if lectura >= UMBRAL_CERCA_SEGURO:
                 return finalizar(True, ESTADO_CERCA, "CERCA CLARAMENTE")

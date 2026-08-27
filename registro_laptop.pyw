@@ -41,7 +41,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.3.9"
+VERSION_SISTEMA = "1.4.0"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
@@ -885,7 +885,7 @@ def crear_modal_verificacion_ubicacion(
     parent,
     mensaje="Asegúrate de estar cerca del carrito.",
     titulo="Verificando ubicación del equipo",
-    estado="Intentando 1 de 3..."
+    estado="Intento 1 de 5"
 ):
     dialogo = tk.Toplevel(parent)
     dialogo.title(titulo)
@@ -2479,7 +2479,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
         def actualizar_intento_ubicacion(intento, total):
             if proximidad_visual_activa["valor"]:
                 try:
-                    estado_ubicacion.config(text=f"Intentando {intento} de {total}...")
+                    estado_ubicacion.config(text=f"Intento {intento} de {total}")
                 except tk.TclError:
                     pass
 
@@ -2490,7 +2490,8 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
             print("[DEVOLUCION] worker de proximidad ejecutándose")
             try:
                 proximidad_valida, estado_proximidad = verificar_proximidad_carrito(
-                    callback_intento=notificar_intento_ubicacion
+                    callback_intento=notificar_intento_ubicacion,
+                    callback_evento=registrar_evento_tecnico
                 )
             except Exception:
                 print("[DEVOLUCION] excepción en proximidad")
@@ -3476,7 +3477,8 @@ def iniciar_sesion():
     def comprobar_proximidad():
         try:
             proximidad_valida, estado_proximidad = verificar_proximidad_carrito(
-                callback_intento=notificar_intento_ubicacion
+                callback_intento=notificar_intento_ubicacion,
+                callback_evento=registrar_evento_tecnico
             )
         except Exception:
             proximidad_valida = False
@@ -3491,7 +3493,7 @@ def iniciar_sesion():
     def actualizar_intento_ubicacion(intento, total):
         if proximidad_visual_activa["valor"]:
             try:
-                estado_ubicacion.config(text=f"Intentando {intento} de {total}...")
+                estado_ubicacion.config(text=f"Intento {intento} de {total}")
             except tk.TclError:
                 pass
 

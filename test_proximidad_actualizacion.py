@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -8,6 +9,33 @@ from identidad_roles import rol_requiere_curp
 
 
 RUTA_APP = Path(__file__).with_name("registro_laptop.pyw")
+
+
+def red_carrito(rssi):
+    return SimpleNamespace(
+        ssid=proximidad.SSID_CARRITO,
+        bssid=proximidad.BSSID_CARRITO,
+        signal=rssi,
+    )
+
+
+class InterfazSimulada:
+    def __init__(self, resultados_por_scan):
+        self.resultados_por_scan = iter(resultados_por_scan)
+        self.resultado_actual = []
+        self.llamadas_scan = 0
+        self.llamadas_resultados = 0
+
+    def scan(self):
+        self.llamadas_scan += 1
+        resultado = next(self.resultados_por_scan)
+        if isinstance(resultado, Exception):
+            raise resultado
+        self.resultado_actual = resultado
+
+    def scan_results(self):
+        self.llamadas_resultados += 1
+        return self.resultado_actual
 
 
 class PruebasActualizacionProximidad(unittest.TestCase):
@@ -27,7 +55,7 @@ class PruebasActualizacionProximidad(unittest.TestCase):
     def test_proximidad_esta_habilitada(self):
         self.assertIs(self.asignacion("PROXIMIDAD_HABILITADA"), True)
         self.assertIs(self.asignacion("MODO_PRUEBA"), False)
-        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.3.8")
+        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.4.0")
 
     def test_prestamo_confirma_nombre_luego_proximidad_y_luego_identidad(self):
         confirmar = self.fuente.index("confirmado = mostrar_confirmacion_personalizada")
@@ -53,7 +81,7 @@ class PruebasActualizacionProximidad(unittest.TestCase):
         self.assertGreater(apagado, 0)
 
     def test_cerca_continua_en_el_nuevo_umbral(self):
-        for lectura in (-60, -66, -67):
+        for lectura in (-60, -68, -69):
             with self.subTest(lectura=lectura), \
                     mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
                     mock.patch.object(proximidad, "_obtener_rssi", return_value=lectura):
@@ -64,9 +92,9 @@ class PruebasActualizacionProximidad(unittest.TestCase):
 
     def test_zona_dudosa_conserva_relecturas_y_confirmacion(self):
         casos = (
-            ((-68, -69, -70), (True, proximidad.ESTADO_CERCA)),
-            ((-70, -70, -70), (True, proximidad.ESTADO_CERCA)),
-            ((-70, -71, -72), (False, proximidad.ESTADO_LEJOS)),
+            ((-70, -71, -72, -73, -74), (True, proximidad.ESTADO_CERCA)),
+            ((-72, -72, -72, -72, -72), (True, proximidad.ESTADO_CERCA)),
+            ((-71, -72, -73, -74, -74), (False, proximidad.ESTADO_LEJOS)),
         )
         for lecturas, esperado in casos:
             with self.subTest(lecturas=lecturas), \
@@ -75,8 +103,85 @@ class PruebasActualizacionProximidad(unittest.TestCase):
                 self.assertEqual(proximidad.verificar_proximidad_carrito(), esperado)
                 self.assertEqual(obtener.call_count, proximidad.MAX_INTENTOS)
 
-    def test_menos_73_es_lejos_inmediato(self):
-        for lectura in (-73, -75):
+    def test_no_detectado_temporal_continua_con_escaneos_nuevos(self):
+        casos = (
+            ([[], [red_carrito(-68)]], 2),
+            ([[], [], [], [], [red_carrito(-68)]], 5),
+        )
+        for resultados, escaneos_esperados in casos:
+            interfaz = InterfazSimulada(resultados)
+            intentos = []
+            eventos = []
+            with self.subTest(escaneos=escaneos_esperados), \
+                    mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=interfaz), \
+                    mock.patch.object(proximidad.time, "sleep") as espera:
+                self.assertEqual(
+                    proximidad.verificar_proximidad_carrito(
+                        callback_intento=lambda intento, total: intentos.append((intento, total)),
+                        callback_evento=eventos.append,
+                    ),
+                    (True, proximidad.ESTADO_CERCA),
+                )
+            self.assertEqual(interfaz.llamadas_scan, escaneos_esperados)
+            self.assertEqual(interfaz.llamadas_resultados, escaneos_esperados)
+            self.assertEqual(espera.call_count, escaneos_esperados)
+            self.assertEqual(intentos[-1], (escaneos_esperados, 5))
+            self.assertIn("resultado=NO_DETECTADO", eventos[0])
+
+    def test_cinco_intentos_vacios_devuelven_no_detectado(self):
+        interfaz = InterfazSimulada([[] for _ in range(5)])
+        with mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=interfaz), \
+                mock.patch.object(proximidad.time, "sleep"):
+            self.assertEqual(
+                proximidad.verificar_proximidad_carrito(),
+                (False, proximidad.ESTADO_NO_DETECTADO),
+            )
+        self.assertEqual(interfaz.llamadas_scan, 5)
+        self.assertEqual(interfaz.llamadas_resultados, 5)
+
+    def test_error_temporal_continua_con_el_siguiente_escaneo(self):
+        interfaz = InterfazSimulada([RuntimeError("temporal"), [red_carrito(-68)]])
+        eventos = []
+        with mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=interfaz), \
+                mock.patch.object(proximidad.time, "sleep"):
+            self.assertEqual(
+                proximidad.verificar_proximidad_carrito(callback_evento=eventos.append),
+                (True, proximidad.ESTADO_CERCA),
+            )
+        self.assertEqual(interfaz.llamadas_scan, 2)
+        self.assertEqual(interfaz.llamadas_resultados, 1)
+        self.assertIn("intento=1/5 escaneo=nuevo resultado=ERROR", eventos[0])
+
+    def test_cada_intento_es_scan_espera_y_una_lista_nueva(self):
+        interfaz = InterfazSimulada([[], [], [], [], []])
+        with mock.patch.object(proximidad.time, "sleep") as espera:
+            for _ in range(5):
+                self.assertIsNone(proximidad._obtener_rssi(interfaz))
+        self.assertEqual(interfaz.llamadas_scan, 5)
+        self.assertEqual(interfaz.llamadas_resultados, 5)
+        espera.assert_has_calls(
+            [mock.call(proximidad.ESPERA_RESULTADOS_SCAN) for _ in range(5)]
+        )
+
+    def test_contador_visual_y_workers_conservan_interfaz_responsiva(self):
+        self.assertEqual(proximidad.MAX_INTENTOS, 5)
+        self.assertIn('estado="Intento 1 de 5"', self.fuente)
+        self.assertNotIn("Intentando 1 de 3", self.fuente)
+        self.assertEqual(
+            self.fuente.count('text=f"Intento {intento} de {total}"'),
+            2,
+        )
+        self.assertEqual(
+            self.fuente.count("threading.Thread(target=comprobar_proximidad, daemon=True).start()"),
+            2,
+        )
+        self.assertEqual(
+            self.fuente.count("callback_evento=registrar_evento_tecnico"),
+            2,
+        )
+
+    def test_menos_75_es_lejos_inmediato(self):
+        for lectura in (-75, -76, -80):
             with self.subTest(lectura=lectura), \
                     mock.patch.object(proximidad, "_obtener_interfaz_wifi", return_value=object()), \
                     mock.patch.object(proximidad, "_obtener_rssi", return_value=lectura):
@@ -105,9 +210,9 @@ class PruebasActualizacionProximidad(unittest.TestCase):
     def test_ssid_bssid_y_nuevos_umbrales(self):
         self.assertEqual(proximidad.SSID_CARRITO, "UARB-SYS-01")
         self.assertEqual(proximidad.BSSID_CARRITO, "b8:27:eb:76:e2:f5")
-        self.assertEqual(proximidad.UMBRAL_CERCA_SEGURO, -67)
-        self.assertEqual(proximidad.UMBRAL_LEJOS_SEGURO, -73)
-        self.assertEqual(proximidad.UMBRAL_CONFIRMACION, -70)
+        self.assertEqual(proximidad.UMBRAL_CERCA_SEGURO, -69)
+        self.assertEqual(proximidad.UMBRAL_LEJOS_SEGURO, -75)
+        self.assertEqual(proximidad.UMBRAL_CONFIRMACION, -72)
 
 
 if __name__ == "__main__":
