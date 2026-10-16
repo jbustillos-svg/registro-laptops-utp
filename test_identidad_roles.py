@@ -29,6 +29,7 @@ def cargar_consultar_datos_identidad(hoja):
         "normalizar_rol": normalizar_rol,
         "seleccionar_flujo_identidad": seleccionar_flujo_identidad,
         "rol_requiere_curp": rol_requiere_curp,
+        "actualizar_cache_persona": lambda *_args, **_kwargs: None,
     }
     exec(compile(modulo, str(ruta), "exec"), espacio)
     return espacio["consultar_datos_identidad"]

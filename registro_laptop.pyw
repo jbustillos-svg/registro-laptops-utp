@@ -16,7 +16,24 @@ import sys
 import certifi
 import tempfile
 import msvcrt
+import uuid
 from contextlib import contextmanager
+from contingencia_local import (
+    CACHE_NO_DISPONIBLE,
+    CACHE_OK,
+    INTERNET_ERROR,
+    INTERNET_OK,
+    SHEETS_API_ERROR,
+    SHEETS_AUTH_ERROR,
+    SHEETS_OK,
+    SHEETS_TIMEOUT,
+    ContingenciaLocal,
+)
+from sincronizador_contingencia import SincronizadorContingencia, enviar_evento_coordinador
+from sincronizacion_config import (
+    actualizar_configuracion_desde_hoja,
+    cargar_configuracion_local,
+)
 from proximidad_carrito import (
     ESTADO_ERROR,
     ESTADO_NO_DETECTADO,
@@ -41,11 +58,12 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.0"
+VERSION_SISTEMA = "1.4.1"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
 hoja_registros = None
+hoja_configuracion_sistema = None
 zona_horaria = pytz.timezone("America/Chihuahua")
 verificar_conexion_activo = True
 procesando_sesion = False
@@ -55,11 +73,19 @@ chk_label = None
 verificacion_aviso_en_curso = False
 conexion_google_lock = threading.Lock()
 actualizacion_lock = threading.Lock()
+sincronizacion_lock = threading.Lock()
+configuracion_sincronizacion_lock = threading.Lock()
 dialogo_admin_abierto = False
 contexto_contingencia_proximidad = None
 confirmacion_contingencia_abierta = False
 registro_contingencias_sesion = []
 ventana_entrega_activa = None
+almacen_contingencia = None
+diagnostico_conectividad = {
+    "internet": None,
+    "sheets": None,
+    "cache": CACHE_NO_DISPONIBLE,
+}
 
 TIEMPO_INACTIVIDAD_MS = 60000
 timeout_inactividad_id = None
@@ -91,6 +117,272 @@ def registrar_evento_tecnico(evento):
             )
     except OSError:
         pass
+
+
+def actualizar_diagnostico_conectividad(componente, estado):
+    """Registra estados independientes para red, Sheets y caché local."""
+    if diagnostico_conectividad.get(componente) == estado:
+        return
+    diagnostico_conectividad[componente] = estado
+    registrar_evento_tecnico(f"CONECTIVIDAD componente={componente} estado={estado}")
+
+
+def clasificar_error_sheets(error):
+    if isinstance(error, (requests.Timeout, socket.timeout)):
+        return SHEETS_TIMEOUT
+    detalle = f"{type(error).__name__}: {error}".lower()
+    if any(texto in detalle for texto in ("auth", "credential", "token", "permission", "forbidden", "unauthorized")):
+        return SHEETS_AUTH_ERROR
+    if "timeout" in detalle or "timed out" in detalle:
+        return SHEETS_TIMEOUT
+    return SHEETS_API_ERROR
+
+
+def inicializar_infraestructura_contingencia():
+    """Prepara SQLite al arrancar, sin impedir el funcionamiento actual si falla."""
+    global almacen_contingencia
+    try:
+        almacen_contingencia = ContingenciaLocal(DIRECTORIO_APP)
+        ruta = almacen_contingencia.inicializar()
+        estado = almacen_contingencia.estado_cache()
+        actualizar_diagnostico_conectividad("cache", estado)
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DB_LISTA ruta={ruta} schema_version="
+            f"{almacen_contingencia.version_esquema()}"
+        )
+    except Exception as error:
+        almacen_contingencia = None
+        actualizar_diagnostico_conectividad("cache", CACHE_NO_DISPONIBLE)
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DB_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def actualizar_cache_persona(matricula, **datos):
+    """Guarda sólo datos confirmados por consultas normales de Sheets."""
+    if almacen_contingencia is None:
+        return
+    try:
+        almacen_contingencia.upsert_persona(matricula, **datos)
+        actualizar_diagnostico_conectividad("cache", CACHE_OK)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CACHE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def obtener_persona_cache(matricula):
+    if almacen_contingencia is None:
+        return None
+    try:
+        return almacen_contingencia.obtener_persona(matricula)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CACHE_LECTURA_ERROR={type(error).__name__}: {error}"
+        )
+        return None
+
+
+def _fecha_hora_local():
+    ahora = datetime.now(zona_horaria)
+    return ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M:%S")
+
+
+def enviar_evento_local_inmediato(id_evento):
+    """Intenta el mismo UUID ya persistido; un fallo conserva la cola local."""
+    if almacen_contingencia is None:
+        return False
+    evento = almacen_contingencia.obtener_evento(id_evento)
+    configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+    if not evento or not configuracion:
+        return False
+    try:
+        referencia = enviar_evento_coordinador(evento, configuracion)
+        almacen_contingencia.marcar_sincronizado(id_evento, referencia)
+        registrar_evento_tecnico(
+            f"COORDINADOR_EVENTO_OK id={id_evento} tipo={evento['tipo_evento']}"
+        )
+        return True
+    except Exception as error:
+        almacen_contingencia.incrementar_intentos(id_evento, type(error).__name__)
+        registrar_evento_tecnico(
+            f"COORDINADOR_EVENTO_PENDIENTE id={id_evento} tipo={evento['tipo_evento']} "
+            f"error={type(error).__name__}"
+        )
+        return False
+
+
+def crear_y_enviar_evento_critico(tipo, matricula, nombre, fecha, hora, laptop_id,
+                                  datos, clave_estable):
+    """Persistencia primero: nunca hay fallback de escritura crítica por gspread."""
+    if almacen_contingencia is None:
+        return False
+    id_evento = str(uuid.uuid5(uuid.NAMESPACE_URL, f"utp-v141:{tipo}:{clave_estable}"))
+    almacen_contingencia.crear_evento(
+        socket.gethostname(), tipo, matricula, nombre, fecha, hora, laptop_id,
+        datos, id_evento=id_evento,
+    )
+    return enviar_evento_local_inmediato(id_evento)
+
+
+def registrar_prestamo_contingencia(matricula, nombre):
+    if almacen_contingencia is None:
+        return False
+    try:
+        fecha, hora = _fecha_hora_local()
+        almacen_contingencia.registrar_prestamo_offline(
+            matricula, nombre, socket.gethostname(), fecha, hora
+        )
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_PRESTAMO_GUARDADO matricula={matricula} fecha={fecha} hora={hora}"
+        )
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_PRESTAMO_ERROR={type(error).__name__}: {error}"
+        )
+        return False
+
+
+def persistir_prestamo_online_local(matricula, nombre, fecha, hora, laptop_id):
+    """No crea evento: Sheets ya confirmó el préstamo normal."""
+    if almacen_contingencia is None:
+        return
+    try:
+        almacen_contingencia.registrar_prestamo_online(
+            matricula, nombre, laptop_id, fecha, hora
+        )
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SESION_ONLINE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def obtener_sesion_local_activa(matricula=None):
+    if almacen_contingencia is None:
+        return None
+    try:
+        sesion = almacen_contingencia.obtener_sesion_activa(socket.gethostname())
+        if sesion and matricula and sesion["matricula"] != str(matricula).strip():
+            return None
+        return sesion
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SESION_LECTURA_ERROR={type(error).__name__}: {error}"
+        )
+        return None
+
+
+def registrar_devolucion_contingencia(matricula):
+    if almacen_contingencia is None:
+        return False
+    try:
+        fecha, hora = _fecha_hora_local()
+        almacen_contingencia.registrar_devolucion_offline(
+            matricula, socket.gethostname(), fecha, hora
+        )
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DEVOLUCION_GUARDADA matricula={matricula} fecha={fecha} hora={hora}"
+        )
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DEVOLUCION_ERROR={type(error).__name__}: {error}"
+        )
+        return False
+
+
+def persistir_devolucion_online_local(matricula, hora_salida):
+    if almacen_contingencia is None:
+        return
+    try:
+        almacen_contingencia.registrar_devolucion_online(
+            matricula, socket.gethostname(), hora_salida
+        )
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SALIDA_ONLINE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def no_entregas_efectivas_local(matricula, no_entregas_cache):
+    if almacen_contingencia is None:
+        return int(no_entregas_cache or 0)
+    try:
+        return almacen_contingencia.no_entregas_efectivas(matricula, no_entregas_cache)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_NO_ENTREGAS_ERROR={type(error).__name__}: {error}"
+        )
+        return int(no_entregas_cache or 0)
+
+
+def actualizar_configuracion_sincronizacion():
+    """Lee la hoja central sólo al conectar o en revisiones poco frecuentes."""
+    if hoja_configuracion_sistema is None:
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    if not configuracion_sincronizacion_lock.acquire(blocking=False):
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    try:
+        configuracion, actualizada = actualizar_configuracion_desde_hoja(
+            DIRECTORIO_APP, hoja_configuracion_sistema
+        )
+        if actualizada:
+            registrar_evento_tecnico("SINCRONIZACION_CONFIG_ACTUALIZADA")
+        return configuracion
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_CONFIG_LECTURA_ERROR={type(error).__name__}"
+        )
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    finally:
+        configuracion_sincronizacion_lock.release()
+
+
+def sincronizar_pendientes_en_segundo_plano():
+    if not sincronizacion_lock.acquire(blocking=False):
+        return
+    try:
+        if not almacen_contingencia:
+            return
+        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+        if not configuracion:
+            return
+        cantidad = SincronizadorContingencia(
+            almacen_contingencia, configuracion, registrar_evento_tecnico
+        ).sincronizar()
+        if cantidad:
+            registrar_evento_tecnico(f"SINCRONIZACION_COMPLETA eventos={cantidad}")
+    finally:
+        sincronizacion_lock.release()
+
+
+def iniciar_sincronizacion_pendientes():
+    threading.Thread(target=sincronizar_pendientes_en_segundo_plano, daemon=True).start()
+
+
+def cerrar_sesion_contingencia_por_nueva_sesion(matricula_anterior):
+    """Equivalente local del cierre automático; conserva ambos eventos pendientes."""
+    if almacen_contingencia is None:
+        return False
+    try:
+        fecha, hora = _fecha_hora_local()
+        laptop_id = socket.gethostname()
+        almacen_contingencia.registrar_no_entrega_local(
+            matricula_anterior, laptop_id, fecha, hora
+        )
+        almacen_contingencia.registrar_cierre_automatico_local(
+            matricula_anterior, laptop_id, fecha, hora
+        )
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CIERRE_AUTOMATICO matricula={matricula_anterior}"
+        )
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CIERRE_AUTOMATICO_ERROR={type(error).__name__}: {error}"
+        )
+        return False
 
 
 def limpiar_logs_antiguos(dias=7):
@@ -1196,49 +1488,8 @@ def matricula_exenta_no_entrega(matricula):
 
 
 def incrementar_no_entregas(matricula, contador_objetivo):
-    """
-    Lleva No_Entregas hasta un objetivo persistido en la fila de Registros.
-    El estado se calcula ÚNICAMENTE por fórmula en Google Sheets.
-    """
-    try:
-        matricula = str(matricula).strip()
-        if matricula_exenta_no_entrega(matricula):
-            return 0, "EXENTO"
-
-        if hoja_alumnos is None:
-            raise ErrorConsultaGoogle("La hoja Alumnos no está disponible")
-
-        matriculas = hoja_alumnos.col_values(1)
-        if matricula not in matriculas:
-            raise ErrorConsultaGoogle("La matrícula no existe en la hoja Alumnos")
-
-        fila = matriculas.index(matricula) + 1
-
-        valor_actual = hoja_alumnos.cell(fila, 5).value
-        no_entregas_actual = int(valor_actual) if valor_actual else 0
-        no_entregas_nuevo = max(no_entregas_actual, int(contador_objetivo))
-
-        try:
-            hoja_alumnos.update_cell(fila, 5, no_entregas_nuevo)
-        except Exception as error_actualizacion:
-            print(f"Respuesta ambigua al sincronizar no entregas: {error_actualizacion}")
-
-        valor_confirmado = hoja_alumnos.cell(fila, 5).value
-        try:
-            contador_confirmado = int(valor_confirmado) if valor_confirmado else 0
-        except (TypeError, ValueError) as error:
-            raise ErrorConsultaGoogle("No se pudo confirmar No_Entregas") from error
-        if contador_confirmado != no_entregas_nuevo:
-            raise ErrorConsultaGoogle("No se pudo confirmar No_Entregas")
-
-        # NO TOCAR columna del estado (tiene fórmula)
-        return no_entregas_nuevo, "CALCULADO_POR_FORMULA"
-
-    except ErrorConsultaGoogle:
-        raise
-    except Exception as e:
-        print(f"Error al incrementar no entregas: {e}")
-        raise ErrorConsultaGoogle("No se pudo actualizar el control del alumno") from e
+    """Obsoleto: los incrementos se aplican sólo en Apps Script."""
+    raise RuntimeError("NO_ENTREGA_DEBE_USAR_COORDINADOR")
     
 def _contador_no_entregas_actual(matricula):
     matriculas = hoja_alumnos.col_values(1)
@@ -1259,13 +1510,7 @@ def _objetivo_estado_intermedio(observacion, prefijo):
 
 
 def _finalizar_observacion(numero_fila, observacion_final):
-    try:
-        hoja_registros.update_cell(numero_fila, COL_OBSERVACION + 1, observacion_final)
-    except Exception as error_actualizacion:
-        print(f"Respuesta ambigua al finalizar no entrega: {error_actualizacion}")
-    confirmado = hoja_registros.cell(numero_fila, COL_OBSERVACION + 1).value
-    if str(confirmado or "").strip() != observacion_final:
-        raise ErrorConsultaGoogle("No se pudo confirmar la observación final")
+    raise RuntimeError("OBSERVACION_DEBE_USAR_COORDINADOR")
 
 
 def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
@@ -1284,6 +1529,17 @@ def _cerrar_sesion_anterior_y_contar_no_entrega(matricula):
 
         registros = hoja_registros.get_all_values()
         hora_actual, _ = obtener_hora_internet()
+
+        # Las escrituras críticas se delegan al coordinador; gspread sólo leyó la sesión.
+        for fila in reversed(registros):
+            if len(fila) > COL_OBSERVACION and fila[COL_MATRICULA] == matricula and fila[COL_HORA_SALIDA].strip() == "" and observacion_es_normal(fila[COL_OBSERVACION]):
+                datos = {"matricula": matricula, "nombre": fila[COL_NOMBRE], "fecha": fila[COL_FECHA], "hora_ingreso": fila[COL_HORA_INGRESO], "hora_salida": hora_actual, "laptop_id": fila[COL_LAPTOP_ID], "observacion": "CIERRE_AUTOMATICO_POR_NUEVA_SESION"}
+                clave = f"{matricula}:{fila[COL_LAPTOP_ID]}:{fila[COL_FECHA]}:{fila[COL_HORA_INGRESO]}"
+                if not matricula_exenta_no_entrega(matricula):
+                    crear_y_enviar_evento_critico("NO_ENTREGA", matricula, fila[COL_NOMBRE], fila[COL_FECHA], hora_actual, fila[COL_LAPTOP_ID], datos, clave)
+                crear_y_enviar_evento_critico("CIERRE_AUTOMATICO", matricula, fila[COL_NOMBRE], fila[COL_FECHA], hora_actual, fila[COL_LAPTOP_ID], datos, clave)
+                return True
+        return False
 
         for i in reversed(range(len(registros))):
             fila = registros[i]
@@ -1333,13 +1589,7 @@ def _cerrar_sesion_anterior_y_contar_no_entrega(matricula):
                         return False
 
                     estado_intermedio = f"PROCESANDO_CIERRE_AUTOMATICO:{objetivo}"
-                    try:
-                        hoja_registros.batch_update([
-                            {"range": f"E{numero_fila}", "values": [[hora_actual]]},
-                            {"range": f"G{numero_fila}", "values": [[estado_intermedio]]}
-                        ])
-                    except Exception as error_marcado:
-                        print(f"Respuesta ambigua al cerrar sesión anterior: {error_marcado}")
+                    raise RuntimeError("CIERRE_AUTOMATICO_DEBE_USAR_COORDINADOR")
                     verificacion = hoja_registros.get(f"E{numero_fila}:G{numero_fila}")
                     if (
                         not verificacion
@@ -1389,6 +1639,9 @@ def obtener_control_alumno(matricula):
 
             no_entregas = int(no_entregas) if no_entregas else 0
             estado = normalizar_estado_alumno(estado, lectura_exitosa=True)
+            actualizar_cache_persona(
+                matricula, no_entregas=no_entregas, estado=estado
+            )
 
             return no_entregas, estado
 
@@ -1553,11 +1806,13 @@ def verificar_internet():
                 allow_redirects=True
             )
             if respuesta.status_code < 500:
+                actualizar_diagnostico_conectividad("internet", INTERNET_OK)
                 return True
                 
         except Exception as e:
             pass
 
+    actualizar_diagnostico_conectividad("internet", INTERNET_ERROR)
     return False
 
 
@@ -1669,7 +1924,7 @@ def iniciar_actualizacion_en_segundo_plano():
 
 
 def conectar_google_sheets(internet_verificado=False):
-    global hoja_alumnos, hoja_registros
+    global hoja_alumnos, hoja_registros, hoja_configuracion_sistema
 
     if not internet_verificado and not verificar_internet():
         cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
@@ -1696,17 +1951,34 @@ def conectar_google_sheets(internet_verificado=False):
 
             hoja_alumnos = sheet.worksheet("Alumnos")
             hoja_registros = sheet.worksheet("Registros")
+            try:
+                hoja_configuracion_sistema = sheet.worksheet("Configuracion_Sistema")
+            except Exception:
+                # El cliente jamás crea esta hoja ni inventa credenciales.
+                hoja_configuracion_sistema = None
 
+            actualizar_diagnostico_conectividad("sheets", SHEETS_OK)
+            actualizar_configuracion_sincronizacion()
+            iniciar_sincronizacion_pendientes()
             cambiar_estado("Conectado", COLOR_EXITO)
             return True
-        except FileNotFoundError:
+        except FileNotFoundError as error:
             hoja_alumnos = None
             hoja_registros = None
+            hoja_configuracion_sistema = None
+            actualizar_diagnostico_conectividad("sheets", SHEETS_AUTH_ERROR)
+            registrar_evento_tecnico(
+                f"SHEETS_CREDENCIALES_ERROR={type(error).__name__}: {error}"
+            )
             cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
             return False
         except Exception as e:
             hoja_alumnos = None
             hoja_registros = None
+            hoja_configuracion_sistema = None
+            actualizar_diagnostico_conectividad(
+                "sheets", clasificar_error_sheets(e)
+            )
             cambiar_estado("Error en la conexión", COLOR_ERROR)
             return False
 
@@ -1717,8 +1989,12 @@ def verificar_conexion_base_datos():
         return False
     try:
         hoja_alumnos.acell("A1")
+        actualizar_diagnostico_conectividad("sheets", SHEETS_OK)
         return True
     except Exception as error:
+        actualizar_diagnostico_conectividad(
+            "sheets", clasificar_error_sheets(error)
+        )
         print(f"Error al verificar Google Sheets: {error}")
         return False
 
@@ -1912,7 +2188,9 @@ def buscar_nombre(matricula):
         celdas = hoja_alumnos.col_values(1)
         if matricula in celdas:
             row = celdas.index(matricula) + 1
-            return hoja_alumnos.cell(row, 2).value
+            nombre = hoja_alumnos.cell(row, 2).value
+            actualizar_cache_persona(matricula, nombre=nombre)
+            return nombre
     except Exception as e:
         print(f"Error al buscar nombre: {e}")
         return None
@@ -1931,7 +2209,9 @@ def buscar_rol(matricula):
         if matricula in celdas:
             row = celdas.index(matricula) + 1
             rol = hoja_alumnos.cell(row, 3).value
-            return rol.strip().upper() if rol else "ALUMNO"
+            rol = rol.strip().upper() if rol else "ALUMNO"
+            actualizar_cache_persona(matricula, rol=rol)
+            return rol
     except Exception as e:
         print(f"Error al buscar rol: {e}")
         return "ALUMNO"
@@ -1950,6 +2230,11 @@ def consultar_datos_identidad(matricula):
         fila = matriculas.index(matricula) + 1
         rol = normalizar_rol(hoja_alumnos.cell(fila, 3).value)
         curp = hoja_alumnos.cell(fila, 4).value if rol_requiere_curp(rol) else None
+        # Sólo se persisten los dos caracteres usados en la validación, no la CURP.
+        curp_ultimos_2 = str(curp).strip()[-2:] if curp else None
+        actualizar_cache_persona(
+            matricula, rol=rol, curp_ultimos_2=curp_ultimos_2
+        )
         return rol, curp
     except ErrorConsultaGoogle:
         raise
@@ -2136,6 +2421,15 @@ def _procesar_no_entrega_si_corresponde(matricula):
 
         registros = hoja_registros.get_all_values()
 
+        for fila in reversed(registros):
+            if len(fila) > COL_OBSERVACION and fila[COL_MATRICULA] == matricula and fila[COL_HORA_SALIDA].strip() == "" and observacion_es_normal(fila[COL_OBSERVACION]) and not matricula_exenta_no_entrega(matricula):
+                fecha, hora = _fecha_hora_local()
+                datos = {"matricula": matricula, "nombre": fila[COL_NOMBRE], "fecha": fila[COL_FECHA], "hora_ingreso": fila[COL_HORA_INGRESO], "hora_salida": hora, "laptop_id": fila[COL_LAPTOP_ID], "observacion": "NO_ENTREGA_CONTADA"}
+                clave = f"{matricula}:{fila[COL_LAPTOP_ID]}:{fila[COL_FECHA]}:{fila[COL_HORA_INGRESO]}"
+                crear_y_enviar_evento_critico("NO_ENTREGA", matricula, fila[COL_NOMBRE], fecha, hora, fila[COL_LAPTOP_ID], datos, clave)
+                return
+        return
+
         for i in reversed(range(len(registros))):
             fila = registros[i]
 
@@ -2183,13 +2477,7 @@ def _procesar_no_entrega_si_corresponde(matricula):
                         break
 
                     estado_intermedio = f"PROCESANDO_NO_ENTREGA:{objetivo}"
-                    try:
-                        hoja_registros.batch_update([
-                            {"range": f"E{numero_fila}", "values": [["-----"]]},
-                            {"range": f"G{numero_fila}", "values": [[estado_intermedio]]}
-                        ])
-                    except Exception as error_marcado:
-                        print(f"Respuesta ambigua al marcar no entrega: {error_marcado}")
+                    raise RuntimeError("NO_ENTREGA_DEBE_USAR_COORDINADOR")
                     verificacion = hoja_registros.get(f"E{numero_fila}:G{numero_fila}")
                     if (
                         not verificacion
@@ -2258,36 +2546,16 @@ def registrar_entrada(matricula):
             hora, fecha = obtener_hora_internet()
             laptop_id = socket.gethostname()
 
-            fila_nueva = [
-                matricula,  # A Matrícula
-                nombre,     # B Nombre
-                fecha,      # C Fecha
-                hora,       # D Hora_Ingreso
-                "",         # E Hora_Salida
-                laptop_id,  # F Laptop_ID
-                "S/N"       # G Observación
-            ]
-
             with bloqueo_local_registro_prestamo():
                 registros = hoja_registros.get_all_values()
                 if _existe_sesion_activa_para_matricula(registros, matricula):
                     return None
-
-                try:
-                    hoja_registros.append_row(fila_nueva)
-                except Exception as error_append:
-                    print(f"Respuesta ambigua al registrar entrada: {error_append}")
-                    try:
-                        registros = hoja_registros.get_all_values()
-                        if _existe_entrada_del_mismo_intento(
-                            registros, matricula, nombre, fecha, hora, laptop_id
-                        ):
-                            return nombre
-                    except Exception as error_verificacion:
-                        print(f"No se pudo verificar la entrada ambigua: {error_verificacion}")
-                    raise
-
-            time.sleep(1)  # JUSTO AQUÍ (MUY IMPORTANTE)
+                sesion = almacen_contingencia.registrar_prestamo_coordinador(
+                    matricula, nombre, laptop_id, fecha, hora, socket.gethostname()
+                )
+                id_evento = sesion.get("prestamo_evento_id")
+                if id_evento:
+                    enviar_evento_local_inmediato(id_evento)
 
             return nombre
 
@@ -2318,84 +2586,27 @@ def _existe_entrada_del_mismo_intento(
 def registrar_salida_con_reintentos(
     nombre, matricula, max_reintentos=3, callback_intento=None
 ):
-    laptop_actual = socket.gethostname()
-    salida_iniciada = False
-    pausas = (0, 1, 2)
-
-    for numero_intento in range(1, max_reintentos + 1):
-        if numero_intento > 1:
-            time.sleep(pausas[min(numero_intento - 1, len(pausas) - 1)])
-        if callback_intento:
-            callback_intento(numero_intento, max_reintentos)
-
-        try:
-            if hoja_registros is None or not verificar_conexion_base_datos():
-                raise ErrorConsultaGoogle("Google Sheets no responde")
-
-            registros = hoja_registros.get_all_values()
-            if not registros:
-                raise ErrorConsultaGoogle("La hoja Registros está vacía")
-
-            hora, _ = obtener_hora_internet()
-            for i in reversed(range(len(registros))):
-                fila = registros[i]
-                if len(fila) <= COL_OBSERVACION or fila[COL_MATRICULA] != matricula:
-                    continue
-
-                hora_salida = fila[COL_HORA_SALIDA].strip()
-                laptop_registro = fila[COL_LAPTOP_ID]
-                observacion = fila[COL_OBSERVACION].strip()
-                if not observacion_es_normal(observacion):
-                    continue
-
-                if laptop_registro == laptop_actual and hora_salida == "":
-                    numero_fila = i + 1
-                    salida_iniciada = True
-                    try:
-                        hoja_registros.update_cell(
-                            numero_fila, COL_HORA_SALIDA + 1, hora
-                        )
-                    except Exception as error_update:
-                        print(f"Respuesta ambigua al registrar salida: {error_update}")
-
-                    salida_guardada = hoja_registros.cell(
-                        numero_fila, COL_HORA_SALIDA + 1
-                    ).value
-                    if (salida_guardada or "").strip() != "":
-                        registrar_evento_tecnico(
-                            f"SHEETS_SALIDA intento={numero_intento} resultado=OK"
-                        )
-                        return True
-                    raise ErrorConsultaGoogle("No se confirmó Hora_Salida")
-
-                if hora_salida == "" and laptop_registro != laptop_actual:
-                    registrar_evento_tecnico(
-                        f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
-                    )
-                    return False
-
-                if laptop_registro == laptop_actual and salida_iniciada:
-                    registrar_evento_tecnico(
-                        f"SHEETS_SALIDA intento={numero_intento} resultado=OK"
-                    )
-                    return True
-                registrar_evento_tecnico(
-                    f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
-                )
-                return False
-
-            raise ErrorConsultaGoogle("No se encontró una sesión activa")
-        except Exception as error:
-            print(f"Error intento {numero_intento}: {error}")
-            registrar_evento_tecnico(
-                f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
-            )
-
-    return False
+    # No se confirmó Hora_Salida: el evento durable queda pendiente y no se apaga.
+    del nombre, max_reintentos
+    if callback_intento:
+        callback_intento(1, 1)
+    try:
+        fecha, hora = _fecha_hora_local()
+        sesion = almacen_contingencia.registrar_devolucion_offline(
+            matricula, socket.gethostname(), fecha, hora
+        )
+        id_evento = sesion.get("devolucion_evento_id")
+        # La devolución queda durable localmente incluso si el POST vence; permite apagar.
+        if id_evento:
+            enviar_evento_local_inmediato(id_evento)
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(f"COORDINADOR_DEVOLUCION_ERROR={type(error).__name__}")
+        return False
 
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
-                                    modal_progreso):
+                                    modal_progreso, modo_contingencia=False):
     """Registra la salida actualizando el modal abierto de devolución."""
     ventana_espera, titulo_label, mensaje_label, estado_label = modal_progreso
 
@@ -2409,10 +2620,13 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
                 "Guardando devolución..."
             )
 
-        exito = registrar_salida_con_reintentos(
-            nombre, matricula, max_reintentos=3,
-            callback_intento=notificar_intento
-        )
+        if modo_contingencia:
+            exito = registrar_devolucion_contingencia(matricula)
+        else:
+            exito = registrar_salida_con_reintentos(
+                nombre, matricula, max_reintentos=3,
+                callback_intento=notificar_intento
+            )
         if exito:
             ejecutar_en_ui(
                 actualizar_progreso,
@@ -2579,14 +2793,18 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
             if not verificar_sheets_con_reintentos(
                 max_intentos=3, callback_intento=notificar_intento
             ):
-                ejecutar_en_ui(procesar_resultado_devolucion, "error_conexion", None)
+                sesion_local = obtener_sesion_local_activa(matricula)
+                estado = "contingencia" if sesion_local else "error_conexion"
+                ejecutar_en_ui(procesar_resultado_devolucion, estado, sesion_local)
                 return
 
             try:
                 registros = hoja_registros.get_all_values()
                 ejecutar_en_ui(procesar_resultado_devolucion, "ok", registros)
             except Exception:
-                ejecutar_en_ui(procesar_resultado_devolucion, "error_conexion", None)
+                sesion_local = obtener_sesion_local_activa(matricula)
+                estado = "contingencia" if sesion_local else "error_conexion"
+                ejecutar_en_ui(procesar_resultado_devolucion, estado, sesion_local)
 
         def actualizar_intento_conexion(intento, total):
             estado_ubicacion.config(
@@ -2594,6 +2812,21 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
             )
 
         def procesar_resultado_devolucion(estado, registros):
+            if estado == "contingencia":
+                actualizar_modal_progreso(
+                    ventana_ubicacion,
+                    titulo_ubicacion,
+                    mensaje_ubicacion,
+                    estado_ubicacion,
+                    "Modo de contingencia",
+                    "El registro se guardará y sincronizará automáticamente.",
+                    "Guardando devolución..."
+                )
+                mostrar_ventana_espera_registro(
+                    ventana, matricula, nombre, modal_progreso,
+                    modo_contingencia=True
+                )
+                return
             if estado != "ok":
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                 if boton:
@@ -2865,8 +3098,10 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
     return False, None
 
 
-def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
+def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
+                                modo_contingencia=False, persona_cache=None):
     global entrada, ventana, procesando_sesion
+    sesion_contingencia_previa = {"valor": None}
 
     if not identidad_confirmada:
         activar_timeout_inactividad()
@@ -2927,10 +3162,18 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         iniciar_validacion_identidad()
 
     def cerrar_sesion_anterior():
-        try:
-            exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
-        except ErrorConsultaGoogle:
-            exito = False
+        if modo_contingencia:
+            previa = sesion_contingencia_previa["valor"]
+            exito = bool(
+                previa and cerrar_sesion_contingencia_por_nueva_sesion(
+                    previa["matricula"]
+                )
+            )
+        else:
+            try:
+                exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
+            except ErrorConsultaGoogle:
+                exito = False
         ejecutar_en_ui(procesar_cierre_anterior, exito)
 
     def procesar_cierre_anterior(exito):
@@ -2949,7 +3192,14 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
 
     def consultar_identidad():
         try:
-            rol, curp_real = consultar_datos_identidad(matricula)
+            if modo_contingencia:
+                rol = normalizar_rol(persona_cache.get("rol"))
+                curp_real = (
+                    persona_cache.get("curp_ultimos_2")
+                    if rol_requiere_curp(rol) else None
+                )
+            else:
+                rol, curp_real = consultar_datos_identidad(matricula)
             if rol is None:
                 registrar_evento_tecnico(
                     f"IDENTIDAD matricula={matricula} resultado=NO_ENCONTRADA"
@@ -3059,9 +3309,18 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
 
     def consultar_control():
         try:
-            procesar_no_entrega_si_corresponde(matricula)
-            no_entregas, estado = obtener_control_alumno(matricula)
-            tiene_pendiente, fecha_entrada, laptop_id = verificar_entrega_pendiente(matricula)
+            if modo_contingencia:
+                no_entregas = no_entregas_efectivas_local(
+                    matricula, persona_cache.get("no_entregas")
+                )
+                estado = persona_cache.get("estado")
+                tiene_pendiente = False
+                fecha_entrada = None
+                laptop_id = None
+            else:
+                procesar_no_entrega_si_corresponde(matricula)
+                no_entregas, estado = obtener_control_alumno(matricula)
+                tiene_pendiente, fecha_entrada, laptop_id = verificar_entrega_pendiente(matricula)
             ejecutar_en_ui(
                 procesar_control,
                 no_entregas,
@@ -3135,7 +3394,10 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         threading.Thread(target=registrar_prestamo, daemon=True).start()
 
     def registrar_prestamo():
-        resultado = registrar_entrada(matricula)
+        if modo_contingencia:
+            resultado = nombre if registrar_prestamo_contingencia(matricula, nombre) else None
+        else:
+            resultado = registrar_entrada(matricula)
         ejecutar_en_ui(finalizar_prestamo, resultado)
 
     def finalizar_prestamo(resultado):
@@ -3149,7 +3411,16 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         ventana.withdraw()
         ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
 
-    threading.Thread(target=consultar_sesion, daemon=True).start()
+    if modo_contingencia:
+        sesion_contingencia_previa["valor"] = obtener_sesion_local_activa()
+        previa = sesion_contingencia_previa["valor"]
+        procesar_sesion(
+            "ok",
+            bool(previa and previa["matricula"] != str(matricula).strip()),
+            previa["laptop_id"] if previa else None,
+        )
+    else:
+        threading.Thread(target=consultar_sesion, daemon=True).start()
     return True
 
 
@@ -3383,6 +3654,7 @@ def iniciar_sesion():
     estado_ubicacion = None
     proximidad_visual_activa = {"valor": False}
     alumno_confirmado = {"nombre": None}
+    acceso_contingencia = {"activo": False, "persona": None}
 
 
     def consultar_acceso():
@@ -3396,7 +3668,11 @@ def iniciar_sesion():
         if not verificar_sheets_con_reintentos(
             max_intentos=3, callback_intento=notificar_intento
         ):
-            ejecutar_en_ui(procesar_acceso_seguro, "error_conexion", None)
+            persona = obtener_persona_cache(matricula)
+            if persona:
+                ejecutar_en_ui(procesar_acceso_seguro, "contingencia", persona)
+            else:
+                ejecutar_en_ui(procesar_acceso_seguro, "sin_cache", None)
             return
 
         nombre = buscar_nombre(matricula)
@@ -3412,21 +3688,24 @@ def iniciar_sesion():
     def procesar_acceso(estado, nombre):
         nonlocal ventana_ubicacion, titulo_ubicacion
         nonlocal mensaje_ubicacion, estado_ubicacion
-        if estado == "sin_internet":
+        if estado == "sin_cache":
             mostrar_error(
-                "Sin acceso a Internet",
-                "No hay conexión disponible.\n\nConecte la computadora e intente nuevamente."
+                "Validación no disponible",
+                "No es posible validar esta matrícula en este momento.\n\n"
+                "Intenta nuevamente más tarde."
             )
             reiniciar_estado_sistema()
             return
 
-        if estado == "error_conexion":
-            mostrar_error(
-                "Error de conexión",
-                "No fue posible verificar la conexión.\n\nIntenta nuevamente."
+        if estado == "contingencia":
+            acceso_contingencia["activo"] = True
+            acceso_contingencia["persona"] = nombre
+            nombre = nombre.get("nombre")
+            cambiar_estado("Modo de contingencia", COLOR_ADVERTENCIA)
+            mostrar_informacion(
+                "Modo de contingencia",
+                "El registro se guardará y sincronizará automáticamente."
             )
-            reiniciar_estado_sistema()
-            return
 
         if not nombre:
             mostrar_error(
@@ -3458,7 +3737,9 @@ def iniciar_sesion():
             mostrar_confirmacion_simple(
                 alumno_confirmado["nombre"],
                 matricula,
-                identidad_confirmada=True
+                identidad_confirmada=True,
+                modo_contingencia=acceso_contingencia["activo"],
+                persona_cache=acceso_contingencia["persona"]
             )
             return
 
@@ -3547,7 +3828,9 @@ def iniciar_sesion():
         mostrar_confirmacion_simple(
             alumno_confirmado["nombre"],
             matricula,
-            identidad_confirmada=True
+            identidad_confirmada=True,
+            modo_contingencia=acceso_contingencia["activo"],
+            persona_cache=acceso_contingencia["persona"]
         )
 
     cambiar_estado("Verificando conexión...", COLOR_ADVERTENCIA)
@@ -3777,8 +4060,9 @@ def iniciar_conexion_en_segundo_plano():
             conectar_google_sheets(internet_verificado=True)
         else:
             def mostrar_sin_conexion():
-                cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
-                mostrar_aviso_internet_bloqueante()
+                # La ausencia de Internet no bloquea por sí sola una matrícula
+                # que pueda validarse con la caché local de contingencia.
+                cambiar_estado("Sin conexión; contingencia disponible", COLOR_ADVERTENCIA)
 
             ejecutar_en_ui(mostrar_sin_conexion)
 
@@ -3786,6 +4070,23 @@ def iniciar_conexion_en_segundo_plano():
 
 def iniciar_verificacion_periodica():
     threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
+
+
+def sincronizar_pendientes_periodicamente():
+    iniciar_sincronizacion_pendientes()
+    try:
+        ventana.after(45000, sincronizar_pendientes_periodicamente)
+    except tk.TclError:
+        pass
+
+
+def actualizar_configuracion_periodicamente():
+    """La versión central se revisa cada diez minutos, nunca por evento."""
+    threading.Thread(target=actualizar_configuracion_sincronizacion, daemon=True).start()
+    try:
+        ventana.after(600000, actualizar_configuracion_periodicamente)
+    except tk.TclError:
+        pass
 
 
 def notificar_interfaz_lista():
@@ -3813,6 +4114,7 @@ registrar_evento_tecnico(
     f"MODO_PRODUCCION={not MODO_PRUEBA} "
     f"PROXIMIDAD_HABILITADA={PROXIMIDAD_HABILITADA}"
 )
+inicializar_infraestructura_contingencia()
 ventana = tk.Tk()
 ventana.bind_all("<Control-Alt-u>", manejar_atajo_administrativo)
 ventana.bind_all("<KeyPress>", registrar_actividad_usuario, add="+")
@@ -3840,6 +4142,8 @@ ventana.after(100, iniciar_limpieza_logs)
 ventana.after(300, iniciar_conexion_en_segundo_plano)
 ventana.after(1800, iniciar_actualizacion_en_segundo_plano)
 ventana.after(5000, iniciar_verificacion_periodica)
+ventana.after(15000, sincronizar_pendientes_periodicamente)
+ventana.after(30000, actualizar_configuracion_periodicamente)
 ventana.after(
     600,
     lambda: iniciar_heartbeat_manager(

@@ -1,5 +1,7 @@
 credenciales.json
 manager_config.json
+sincronizacion_config.json
+sincronizacion_config.json.tmp
 ENTORNO.txt
 .venv/
 .requirements.sha256
@@ -8,3 +10,8 @@ ENTORNO.txt
 __pycache__/
 *.log
 *.exe
+contingencia.db
+contingencia.db-wal
+contingencia.db-shm
+contingencia.db-journal
+contingencia.db-*
