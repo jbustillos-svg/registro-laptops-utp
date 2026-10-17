@@ -421,14 +421,15 @@ class ContingenciaLocal:
         with self._conexion() as conexion:
             conexion.execute("BEGIN IMMEDIATE")
             try:
-                existente = conexion.execute(
-                    "SELECT * FROM sesiones_locales WHERE laptop_id = ? AND hora_salida IS NULL",
-                    (laptop_id,),
-                ).fetchone()
+                existente, sesion_reconciliada = self._reconciliar_sesion_activa_en_conexion(
+                    conexion, laptop_id
+                )
                 if existente:
                     if existente["matricula"] != str(matricula).strip():
                         raise RuntimeError("Ya existe una sesión activa en esta laptop")
                     resultado = self._fila_a_dict(existente)
+                    resultado["sesion_existente"] = True
+                    resultado["sesion_reconciliada"] = sesion_reconciliada
                     conexion.commit()
                     return resultado
                 ahora = self._ahora()
@@ -461,10 +462,57 @@ class ContingenciaLocal:
                         fecha_entrada, hora_entrada, self._datos_fila_registro(sesion),
                     )
                 conexion.commit()
-                return self._fila_a_dict(sesion)
+                resultado = self._fila_a_dict(sesion)
+                resultado["sesion_existente"] = False
+                resultado["sesion_reconciliada"] = sesion_reconciliada
+                return resultado
             except Exception:
                 conexion.rollback()
                 raise
+
+    @staticmethod
+    def _reconciliar_sesion_activa_en_conexion(conexion, laptop_id):
+        """Cierra sólo una sesión cuyo cierre ya fue aplicado remotamente.
+
+        Una sesión sin evidencia de devolución/no-entrega/cierre sincronizado se
+        conserva: podría corresponder a un préstamo real todavía abierto.
+        """
+        sesion = conexion.execute(
+            "SELECT * FROM sesiones_locales WHERE laptop_id = ? AND hora_salida IS NULL",
+            (laptop_id,),
+        ).fetchone()
+        if not sesion:
+            return None, False
+        cierres = (
+            ("devolucion_evento_id", None),
+            ("no_entrega_evento_id", "NO_ENTREGA_CONTADA"),
+            ("cierre_automatico_evento_id", "CIERRE_AUTOMATICO_POR_NUEVA_SESION"),
+        )
+        for columna, observacion in cierres:
+            id_evento = sesion[columna]
+            if not id_evento:
+                continue
+            evento = conexion.execute(
+                """
+                SELECT tipo_evento, hora_evento, sincronizado FROM eventos_pendientes
+                WHERE id_evento = ?
+                """,
+                (id_evento,),
+            ).fetchone()
+            if not evento or not evento["sincronizado"]:
+                continue
+            actualizaciones = "hora_salida = ?, fecha_actualizacion = ?"
+            parametros = [evento["hora_evento"], ContingenciaLocal._ahora()]
+            if observacion:
+                actualizaciones += ", observacion = ?"
+                parametros.append(observacion)
+            parametros.append(sesion["id_sesion"])
+            conexion.execute(
+                f"UPDATE sesiones_locales SET {actualizaciones} WHERE id_sesion = ?",
+                parametros,
+            )
+            return None, True
+        return sesion, False
 
     def registrar_devolucion_offline(self, matricula, laptop_id, fecha_evento,
                                     hora_evento, equipo=None):

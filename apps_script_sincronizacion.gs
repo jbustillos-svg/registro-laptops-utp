@@ -217,9 +217,23 @@ function aplicarEvento_(libro, evento) {
   if (!registros || !alumnos) throw new Error('HOJA_OPERATIVA_NO_ENCONTRADA');
   const datos = evento.datos || {};
   if (evento.tipo_evento === 'PRESTAMO') {
-    let fila = buscarRegistro_(registros, evento, datos);
-    if (!fila) fila = insertarPrestamoCronologico_(registros, evento, datos);
-    verificarPrestamo_(registros, fila, evento, datos);
+    // PREPARANDO y ERROR son estados ambiguos: antes de insertar se reconcilian
+    // contra Registros. Esto hace idempotente un reintento tras escritura aplicada.
+    let coincidencias = buscarRegistrosPrestamoCompatibles_(registros, evento, datos);
+    if (!coincidencias.length) {
+      insertarPrestamoCronologico_(registros, evento, datos);
+      // La inserción cronológica puede cambiar números de fila; se busca de nuevo.
+      coincidencias = buscarRegistrosPrestamoCompatibles_(registros, evento, datos);
+    }
+    if (!coincidencias.length) {
+      verificarPrestamo_(registros, null, evento, datos);
+    }
+    if (coincidencias.length > 1) {
+      registrarDiagnosticoPrestamo_(
+        'DUPLICADOS_PREEXISTENTES', evento, coincidencias[0].fila, coincidencias.length
+      );
+    }
+    const fila = verificarPrestamo_(registros, coincidencias[0].fila, evento, datos);
     return 'Registros!' + fila;
   }
   const fila = buscarRegistro_(registros, evento, datos);
@@ -243,45 +257,125 @@ function aplicarEvento_(libro, evento) {
 }
 
 function buscarRegistro_(hoja, evento, datos) {
+  const coincidencias = buscarRegistrosPrestamoCompatibles_(hoja, evento, datos);
+  return coincidencias.length ? coincidencias[0].fila : null;
+}
+
+function identidadPrestamo_(evento, datos) {
+  return {
+    matricula: normalizarTexto_(evento.matricula),
+    nombre: normalizarTexto_(datos.nombre || evento.nombre || ''),
+    fecha: normalizarFecha_(datos.fecha || evento.fecha_evento || ''),
+    hora: normalizarHora_(datos.hora_ingreso || evento.hora_evento || ''),
+    laptopId: normalizarTexto_(evento.laptop_id)
+  };
+}
+
+function buscarRegistrosPrestamoCompatibles_(hoja, evento, datos) {
+  const identidad = identidadPrestamo_(evento, datos);
   const filas = hoja.getDataRange().getValues();
-  const fecha = String(datos.fecha || evento.fecha_evento || '');
-  const hora = String(datos.hora_ingreso || '');
-  const nombre = String(datos.nombre || evento.nombre || '');
+  const coincidencias = [];
   for (let indice = 1; indice < filas.length; indice++) {
     const fila = filas[indice];
-    if (String(fila[0]) === String(evento.matricula) && String(fila[5]) === String(evento.laptop_id) &&
-        String(fila[2]) === fecha && String(fila[3]) === hora && (!nombre || String(fila[1]) === nombre)) {
-      return indice + 1;
+    if (registroPrestamoCompatible_(fila, identidad)) {
+      coincidencias.push({fila: indice + 1, valores: fila});
     }
   }
-  return null;
+  return coincidencias;
+}
+
+function registroPrestamoCompatible_(registro, identidad) {
+  return normalizarTexto_(registro[0]) === identidad.matricula &&
+    normalizarTexto_(registro[5]) === identidad.laptopId &&
+    normalizarFecha_(registro[2]) === identidad.fecha &&
+    normalizarHora_(registro[3]) === identidad.hora &&
+    (!identidad.nombre || normalizarTexto_(registro[1]) === identidad.nombre);
 }
 
 function insertarPrestamoCronologico_(hoja, evento, datos) {
-  const fecha = String(datos.fecha || evento.fecha_evento || '');
-  const hora = String(datos.hora_ingreso || evento.hora_evento || '');
-  const nuevaClave = fecha + 'T' + hora;
+  const identidad = identidadPrestamo_(evento, datos);
+  const nuevaClave = identidad.fecha + 'T' + identidad.hora;
   const filas = hoja.getDataRange().getValues();
   let destino = hoja.getLastRow() + 1;
   for (let indice = 1; indice < filas.length; indice++) {
-    const clave = String(filas[indice][2] || '') + 'T' + String(filas[indice][3] || '');
+    const clave = normalizarFecha_(filas[indice][2]) + 'T' + normalizarHora_(filas[indice][3]);
     if (clave > nuevaClave) { destino = indice + 1; break; }
   }
   if (destino <= hoja.getLastRow()) hoja.insertRowBefore(destino);
   hoja.getRange(destino, 1, 1, 7).setValues([[
-    evento.matricula, String(datos.nombre || evento.nombre || ''), fecha, hora, '',
-    evento.laptop_id, 'S/N'
+    identidad.matricula, identidad.nombre, identidad.fecha, identidad.hora, '',
+    identidad.laptopId, 'S/N'
   ]]);
   return destino;
 }
 
 function verificarPrestamo_(hoja, fila, evento, datos) {
-  const registro = hoja.getRange(fila, 1, 1, 7).getValues()[0];
-  if (String(registro[0]) !== String(evento.matricula) || String(registro[5]) !== String(evento.laptop_id) ||
-      String(registro[2]) !== String(datos.fecha || evento.fecha_evento || '') ||
-      String(registro[3]) !== String(datos.hora_ingreso || evento.hora_evento || '')) {
-    throw new Error('VERIFICACION_PRESTAMO_FALLIDA');
+  const identidad = identidadPrestamo_(evento, datos);
+  let registro = null;
+  if (fila) {
+    registro = hoja.getRange(fila, 1, 1, 7).getValues()[0];
+    if (registroPrestamoCompatible_(registro, identidad)) return fila;
   }
+  // Releer toda la hoja permite recuperarse de un desplazamiento de fila o de
+  // una representación Date/número que cambió entre la escritura y la lectura.
+  const coincidencias = buscarRegistrosPrestamoCompatibles_(hoja, evento, datos);
+  if (coincidencias.length) return coincidencias[0].fila;
+  registrarDiagnosticoPrestamo_('VERIFICACION_PRESTAMO_FALLIDA', evento, fila, 0, registro);
+  throw new Error('VERIFICACION_PRESTAMO_FALLIDA');
+}
+
+function normalizarTexto_(valor) {
+  return String(valor === null || valor === undefined ? '' : valor).trim();
+}
+
+function esFecha_(valor) {
+  return Object.prototype.toString.call(valor) === '[object Date]' && !isNaN(valor.getTime());
+}
+
+function normalizarFecha_(valor) {
+  if (esFecha_(valor)) {
+    return Utilities.formatDate(valor, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  const texto = normalizarTexto_(valor);
+  const coincidencia = texto.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  if (coincidencia) {
+    return coincidencia[1] + '-' + ('0' + coincidencia[2]).slice(-2) + '-' + ('0' + coincidencia[3]).slice(-2);
+  }
+  return texto;
+}
+
+function normalizarHora_(valor) {
+  if (esFecha_(valor)) {
+    return Utilities.formatDate(valor, Session.getScriptTimeZone(), 'HH:mm:ss');
+  }
+  if (typeof valor === 'number' && isFinite(valor) && valor >= 0 && valor < 1) {
+    const segundos = Math.round(valor * 86400) % 86400;
+    return ('0' + Math.floor(segundos / 3600)).slice(-2) + ':' +
+      ('0' + Math.floor((segundos % 3600) / 60)).slice(-2) + ':' +
+      ('0' + (segundos % 60)).slice(-2);
+  }
+  const texto = normalizarTexto_(valor);
+  const coincidencia = texto.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (coincidencia) {
+    return ('0' + coincidencia[1]).slice(-2) + ':' + coincidencia[2] + ':' + (coincidencia[3] || '00');
+  }
+  return texto;
+}
+
+function registrarDiagnosticoPrestamo_(codigo, evento, fila, coincidencias, registro) {
+  const identidad = identidadPrestamo_(evento, evento.datos || {});
+  const esperado = {
+    matricula: identidad.matricula, fecha: identidad.fecha,
+    hora: identidad.hora, laptop_id: identidad.laptopId
+  };
+  const leido = registro ? {
+    matricula: normalizarTexto_(registro[0]), fecha: normalizarFecha_(registro[2]),
+    hora: normalizarHora_(registro[3]), laptop_id: normalizarTexto_(registro[5])
+  } : {};
+  Logger.log(codigo + ' id=' + String(evento.id_evento || '') +
+    ' referencia=' + (fila ? 'Registros!' + fila : 'SIN_REFERENCIA') +
+    ' coincidencias=' + Number(coincidencias || 0) +
+    ' esperado=' + JSON.stringify(esperado) + ' leido=' + JSON.stringify(leido));
 }
 
 function aplicarNoEntrega_(alumnos, registros, filaRegistro, evento) {

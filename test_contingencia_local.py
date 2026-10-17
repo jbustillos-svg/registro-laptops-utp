@@ -168,6 +168,75 @@ class PruebasContingenciaLocal(unittest.TestCase):
         self.assertEqual(evento["tipo_evento"], "PRESTAMO")
         self.assertEqual(evento["sincronizado"], 0)
 
+    def test_sesion_previa_cerrada_permite_nuevo_prestamo_y_evento_unico(self):
+        self.almacen.inicializar()
+        self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        self.almacen.registrar_devolucion_online("A1", "LAP-1", "10:00:00")
+        nuevo = self.almacen.registrar_prestamo_coordinador(
+            "B1", "Beto", "LAP-1", "2026-10-16", "11:00:00"
+        )
+        repetido = self.almacen.registrar_prestamo_coordinador(
+            "B1", "Beto", "LAP-1", "2026-10-16", "11:00:00"
+        )
+        self.assertFalse(nuevo["sesion_existente"])
+        self.assertTrue(repetido["sesion_existente"])
+        self.assertEqual(nuevo["prestamo_evento_id"], repetido["prestamo_evento_id"])
+        self.assertEqual(
+            len([evento for evento in self.almacen.obtener_eventos_pendientes()
+                 if evento["tipo_evento"] == "PRESTAMO" and evento["matricula"] == "B1"]),
+            1,
+        )
+
+    def test_reconcilia_cierre_remoto_aplicado_antes_de_nuevo_prestamo(self):
+        self.almacen.inicializar()
+        anterior = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        cerrada = self.almacen.registrar_devolucion_offline(
+            "A1", "LAP-1", "2026-10-16", "10:00:00"
+        )
+        self.almacen.marcar_sincronizado(cerrada["devolucion_evento_id"], "Registros!2")
+        # Simula una interrupción antigua: el cierre remoto está aplicado, la fila local quedó activa.
+        with self.almacen._conexion() as conexion:
+            conexion.execute(
+                "UPDATE sesiones_locales SET hora_salida = NULL WHERE id_sesion = ?",
+                (anterior["id_sesion"],),
+            )
+        nuevo = self.almacen.registrar_prestamo_coordinador(
+            "B1", "Beto", "LAP-1", "2026-10-16", "11:00:00"
+        )
+        self.assertTrue(nuevo["sesion_reconciliada"])
+        self.assertEqual(nuevo["matricula"], "B1")
+
+    def test_sesion_realmente_activa_bloquea_otro_prestamo(self):
+        self.almacen.inicializar()
+        self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        with self.assertRaisesRegex(RuntimeError, "sesión activa"):
+            self.almacen.registrar_prestamo_coordinador(
+                "B1", "Beto", "LAP-1", "2026-10-16", "11:00:00"
+            )
+
+    def test_error_sqlite_revierte_sesion_y_evento_de_prestamo(self):
+        self.almacen.inicializar()
+        with self.almacen._conexion() as conexion:
+            conexion.execute(
+                """
+                CREATE TRIGGER bloquear_prestamo_prueba
+                BEFORE INSERT ON sesiones_locales
+                BEGIN SELECT RAISE(ABORT, 'FALLO_SQLITE_PRUEBA'); END
+                """
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "FALLO_SQLITE_PRUEBA"):
+            self.almacen.registrar_prestamo_coordinador(
+                "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+            )
+        self.assertIsNone(self.almacen.obtener_sesion_activa("LAP-1"))
+        self.assertEqual(self.almacen.obtener_eventos_pendientes(), [])
+
     def test_devolucion_online_cierra_sesion_sin_evento_pendiente(self):
         self.almacen.inicializar()
         self.almacen.registrar_prestamo_online(

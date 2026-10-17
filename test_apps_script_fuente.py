@@ -35,6 +35,16 @@ class PruebasFuenteAppsScript(unittest.TestCase):
         self.assertIn("esUrlWebAppProduccion_(urlDetectada)", self.fuente)
         self.assertIn("CONFIGURAR_URL_APPS_SCRIPT_EXEC", self.fuente)
 
+    def test_prestamo_reconcilia_y_normaliza_antes_de_insertar(self):
+        for simbolo in (
+            "buscarRegistrosPrestamoCompatibles_",
+            "normalizarFecha_",
+            "normalizarHora_",
+            "DUPLICADOS_PREEXISTENTES",
+            "VERIFICACION_PRESTAMO_FALLIDA",
+        ):
+            self.assertIn(simbolo, self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()

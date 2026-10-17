@@ -2542,7 +2542,9 @@ def _existe_sesion_activa_para_matricula(registros, matricula):
 
 def registrar_entrada(matricula):
     try:
+        registrar_evento_tecnico(f"PRESTAMO_LOCAL_INICIANDO matricula={matricula}")
         if hoja_registros is None:
+            registrar_evento_tecnico("PRESTAMO_LOCAL_ERROR tipo=RuntimeError mensaje=HOJA_REGISTROS_NO_DISPONIBLE")
             return None
 
         nombre = buscar_nombre(matricula)
@@ -2553,17 +2555,53 @@ def registrar_entrada(matricula):
             with bloqueo_local_registro_prestamo():
                 registros = hoja_registros.get_all_values()
                 if _existe_sesion_activa_para_matricula(registros, matricula):
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE origen=REGISTROS"
+                    )
                     return None
+                previa = almacen_contingencia.obtener_sesion_activa(laptop_id)
+                if previa:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE "
+                        f"sesion={previa.get('id_sesion', '')} "
+                        f"prestamo_sincronizado={previa.get('prestamo_sincronizado', False)}"
+                    )
                 sesion = almacen_contingencia.registrar_prestamo_coordinador(
                     matricula, nombre, laptop_id, fecha, hora, socket.gethostname()
                 )
                 id_evento = sesion.get("prestamo_evento_id")
+                if sesion.get("sesion_existente"):
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE "
+                        f"sesion={sesion.get('id_sesion', '')} "
+                        f"reconciliada={sesion.get('sesion_reconciliada', False)}"
+                    )
+                else:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_CREADA "
+                        f"sesion={sesion.get('id_sesion', '')} "
+                        f"reconciliada_previa={sesion.get('sesion_reconciliada', False)}"
+                    )
                 if id_evento:
+                    if not sesion.get("sesion_existente"):
+                        registrar_evento_tecnico(
+                            f"PRESTAMO_LOCAL_EVENTO_CREADO id={id_evento} tipo=PRESTAMO"
+                        )
                     enviar_evento_local_inmediato(id_evento)
+                else:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE evento=NO_APLICA"
+                    )
 
             return nombre
+        registrar_evento_tecnico(
+            "PRESTAMO_LOCAL_ERROR tipo=LookupError mensaje=NOMBRE_NO_DISPONIBLE"
+        )
 
     except Exception as e:
+        registrar_evento_tecnico(
+            f"PRESTAMO_LOCAL_ERROR tipo={type(e).__name__} mensaje={str(e)[:300]}"
+        )
         print(f"Error al registrar entrada: {e}")
 
     return None
