@@ -69,12 +69,18 @@ function prepararInfraestructuraContingencia() {
    */
   const apiKey = PropertiesService.getScriptProperties().getProperty('UTP_SYNC_API_KEY');
   if (!apiKey) throw new Error('CONFIGURAR_UTP_SYNC_API_KEY');
-  const url = ScriptApp.getService().getUrl();
-  if (!url) throw new Error('DESPLEGAR_WEB_APP_ANTES_DE_PREPARAR');
+  const urlDetectada = ScriptApp.getService().getUrl();
 
   const libro = SpreadsheetApp.getActiveSpreadsheet();
   asegurarHojaEventos_(libro);
   const configuracion = asegurarHojaConfiguracion_(libro);
+  const urlExistente = valorConfiguracion_(configuracion, 'URL_APPS_SCRIPT');
+  const url = esUrlWebAppProduccion_(urlExistente)
+    ? urlExistente
+    : (esUrlWebAppProduccion_(urlDetectada) ? urlDetectada : '');
+  if (!url) {
+    throw new Error('CONFIGURAR_URL_APPS_SCRIPT_EXEC');
+  }
   configuracion.getRange(1, 1, 1, 2).setValues([CABECERAS_CONFIGURACION]);
   configuracion.getRange(2, 1, 3, 2).setValues([
     ['URL_APPS_SCRIPT', url],
@@ -87,6 +93,20 @@ function prepararInfraestructuraContingencia() {
     const proteccion = configuracion.protect();
     proteccion.setWarningOnly(true);
   } catch (ignored) {}
+}
+
+function esUrlWebAppProduccion_(url) {
+  return /^https:\/\/script\.google\.com(?:\/a\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)?\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(url || ''));
+}
+
+function valorConfiguracion_(hoja, clave) {
+  const filas = hoja.getDataRange().getValues();
+  for (let indice = 1; indice < filas.length; indice++) {
+    if (String(filas[indice][0] || '').trim().toUpperCase() === clave) {
+      return String(filas[indice][1] || '').trim();
+    }
+  }
+  return '';
 }
 
 function leerSolicitud_(e) {

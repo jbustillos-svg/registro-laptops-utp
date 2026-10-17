@@ -30,6 +30,11 @@ class PruebasFuenteAppsScript(unittest.TestCase):
         self.assertIn("getScriptProperties().getProperty('UTP_SYNC_API_KEY')", self.fuente)
         self.assertNotIn("UTP_SYNC_API_KEY =", self.fuente)
 
+    def test_preparacion_solo_acepta_exec_y_conserva_la_existente(self):
+        self.assertIn("esUrlWebAppProduccion_(urlExistente)", self.fuente)
+        self.assertIn("esUrlWebAppProduccion_(urlDetectada)", self.fuente)
+        self.assertIn("CONFIGURAR_URL_APPS_SCRIPT_EXEC", self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()
