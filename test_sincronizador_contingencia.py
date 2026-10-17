@@ -5,7 +5,12 @@ import unittest
 import requests
 
 from contingencia_local import ContingenciaLocal
-from sincronizador_contingencia import SincronizadorContingencia, enviar_evento_coordinador
+from sincronizador_contingencia import (
+    ErrorCoordinador,
+    SincronizadorContingencia,
+    diagnostico_error_coordinador,
+    enviar_evento_coordinador,
+)
 
 
 CONFIG = {
@@ -18,10 +23,17 @@ CONFIG = {
 class RespuestaFalsa:
     status_code = 200
 
-    def __init__(self, cuerpo):
+    def __init__(self, cuerpo, texto="", status_code=200, headers=None, history=None):
         self.cuerpo = cuerpo
+        self.text = texto
+        self.status_code = status_code
+        self.headers = headers or {"Content-Type": "application/json"}
+        self.history = history or []
+        self.url = CONFIG["URL_APPS_SCRIPT"]
 
     def json(self):
+        if isinstance(self.cuerpo, Exception):
+            raise self.cuerpo
         return self.cuerpo
 
 
@@ -43,8 +55,8 @@ class PruebasClienteCoordinador(unittest.TestCase):
     def test_post_contiene_evento_y_nunca_se_registra_clave(self):
         solicitudes = []
 
-        def post(url, json, timeout):
-            solicitudes.append((url, json, timeout))
+        def post(url, json, timeout, **kwargs):
+            solicitudes.append((url, json, timeout, kwargs))
             return RespuestaFalsa({"estado": "APLICADO", "referencia_registro": "Registros!2"})
 
         cantidad = SincronizadorContingencia(
@@ -53,6 +65,8 @@ class PruebasClienteCoordinador(unittest.TestCase):
         self.assertEqual(cantidad, 1)
         self.assertEqual(solicitudes[0][1]["id_evento"], self.evento)
         self.assertEqual(solicitudes[0][1]["api_key"], CONFIG["API_KEY"])
+        self.assertTrue(solicitudes[0][3]["allow_redirects"])
+        self.assertEqual(solicitudes[0][3]["headers"]["Content-Type"], "application/json")
         self.assertFalse(any(CONFIG["API_KEY"] in log for log in self.logs))
         self.assertEqual(self.almacen.obtener_eventos_pendientes(), [])
 
@@ -91,12 +105,48 @@ class PruebasClienteCoordinador(unittest.TestCase):
     def test_envio_inmediato_y_reintento_usan_mismo_uuid(self):
         evento = self.almacen.obtener_evento(self.evento)
         enviados = []
-        def post(_url, json, timeout):
+        def post(_url, json, timeout, **_kwargs):
             enviados.append(json["id_evento"])
             return RespuestaFalsa({"estado": "YA_APLICADO"})
         enviar_evento_coordinador(evento, CONFIG, post=post)
         enviar_evento_coordinador(evento, CONFIG, post=post)
         self.assertEqual(enviados, [self.evento, self.evento])
+
+    def test_html_con_http_200_conserva_detalle_tecnico_sin_clave(self):
+        evento = self.almacen.obtener_evento(self.evento)
+        respuesta = RespuestaFalsa(
+            ValueError("JSON inválido"), texto="<html>portal api_key=secreto-prueba</html>",
+            headers={"Content-Type": "text/html"},
+        )
+        with self.assertRaises(ErrorCoordinador) as contexto:
+            enviar_evento_coordinador(evento, CONFIG, post=lambda *_a, **_k: respuesta)
+        detalle = diagnostico_error_coordinador(contexto.exception)
+        self.assertIn("RESPUESTA_COORDINADOR_INVALIDA", detalle)
+        self.assertIn("content_type=text/html", detalle)
+        self.assertIn("muestra=<html>portal api_key=[REDACTADO]", detalle)
+        self.assertNotIn(CONFIG["API_KEY"], detalle)
+
+    def test_http_y_redirect_se_registran_en_error_tecnico(self):
+        previo = RespuestaFalsa(None, status_code=302, headers={
+            "Location": "https://script.googleusercontent.com/macros/resultado?token=privado"
+        })
+        previo.url = CONFIG["URL_APPS_SCRIPT"]
+        previo.request = type("Solicitud", (), {"method": "POST"})()
+        respuesta = RespuestaFalsa(None, texto="error api_key=secreto-prueba", status_code=502,
+                                  headers={"Content-Type": "text/html"}, history=[previo])
+        respuesta.url = "https://script.googleusercontent.com/macros/resultado?token=privado"
+        respuesta.request = type("Solicitud", (), {"method": "GET"})()
+        with self.assertRaises(ErrorCoordinador) as contexto:
+            enviar_evento_coordinador(
+                self.almacen.obtener_evento(self.evento), CONFIG,
+                post=lambda *_a, **_k: respuesta,
+            )
+        detalle = diagnostico_error_coordinador(contexto.exception)
+        self.assertIn("HTTP_502", detalle)
+        self.assertIn("302:POST:https://script.google.com/macros/s/ejemplo/exec", detalle)
+        self.assertIn("final:GET:https://script.googleusercontent.com/macros/resultado", detalle)
+        self.assertNotIn("token=privado", detalle)
+        self.assertNotIn(CONFIG["API_KEY"], detalle)
 
 
 if __name__ == "__main__":

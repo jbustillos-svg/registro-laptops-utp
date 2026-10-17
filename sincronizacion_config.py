@@ -6,6 +6,7 @@ conectar y de forma periódica; el sincronizador usa siempre esta copia local.
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ARCHIVO_CONFIGURACION_SINCRONIZACION = "sincronizacion_config.json"
@@ -26,7 +27,19 @@ def validar_configuracion(configuracion):
         if not isinstance(valor, (str, int)) or not str(valor).strip():
             return None
         resultado[clave] = str(valor).strip()
-    if not resultado["URL_APPS_SCRIPT"].startswith("https://script.google.com/"):
+    try:
+        url = urlsplit(resultado["URL_APPS_SCRIPT"])
+    except ValueError:
+        return None
+    if (
+        url.scheme != "https"
+        or url.hostname != "script.google.com"
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+        or not url.path.rstrip("/").endswith("/exec")
+    ):
         return None
     return resultado
 

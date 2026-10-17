@@ -6,8 +6,10 @@ aplica operaciones críticas y resuelve la idempotencia global por UUID.
 import json
 import os
 import msvcrt
+import re
 import threading
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import requests
 
@@ -19,7 +21,101 @@ TIMEOUT_SEGUNDO_PLANO = (TIMEOUT_CONEXION, TIMEOUT_RESPUESTA)
 
 
 class ErrorCoordinador(RuntimeError):
-    pass
+    """Error público, con contexto técnico seguro sólo para el log local."""
+
+    def __init__(self, codigo, diagnostico=None, api_key=None):
+        super().__init__(codigo)
+        self.diagnostico = diagnostico or {}
+        self._api_key = api_key
+
+
+def url_segura(url):
+    """Devuelve únicamente esquema, host y ruta; nunca query, fragmento o clave."""
+    try:
+        partes = urlsplit(str(url))
+        if not partes.scheme or not partes.hostname:
+            return "URL_INVALIDA"
+        host = partes.hostname
+        try:
+            if partes.port:
+                host = f"{host}:{partes.port}"
+        except ValueError:
+            return "URL_INVALIDA"
+        return f"{partes.scheme}://{host}{partes.path or '/'}"
+    except (TypeError, ValueError):
+        return "URL_INVALIDA"
+
+
+def _texto_sanitizado(valor, api_key=None, limite=300):
+    """Compacta texto de red y elimina secretos frecuentes antes de registrarlo."""
+    texto = str(valor or "").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    if api_key:
+        texto = texto.replace(str(api_key), "[REDACTADO]")
+    texto = re.sub(
+        r"(?i)([\"']?(?:api[_-]?key|authorization|access[_-]?token|id[_-]?token|token|password|cookie)[\"']?\s*[:=]\s*[\"']?)([^\"'\s,&}]+)",
+        r"\1[REDACTADO]", texto,
+    )
+    texto = re.sub(r"(?i)\b(bearer\s+)[^\s,;]+", r"\1[REDACTADO]", texto)
+    texto = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[EMAIL_REDACTADO]", texto)
+    return texto[:limite]
+
+
+def _cadena_redirecciones(respuesta):
+    historial = list(getattr(respuesta, "history", None) or [])
+    if not historial:
+        return "ninguna"
+    pasos = []
+    for previo in historial:
+        solicitud = getattr(previo, "request", None)
+        metodo = getattr(solicitud, "method", "?")
+        destino = ""
+        cabeceras = getattr(previo, "headers", {}) or {}
+        if hasattr(cabeceras, "get"):
+            destino = cabeceras.get("Location", "")
+        pasos.append(
+            f"{getattr(previo, 'status_code', '?')}:{metodo}:{url_segura(getattr(previo, 'url', ''))}"
+            + (f"->{url_segura(destino)}" if destino else "")
+        )
+    solicitud_final = getattr(respuesta, "request", None)
+    metodo_final = getattr(solicitud_final, "method", "?")
+    pasos.append(f"final:{metodo_final}:{url_segura(getattr(respuesta, 'url', ''))}")
+    return ">".join(pasos)
+
+
+def diagnostico_respuesta_coordinador(respuesta, api_key=None, incluir_muestra=False):
+    """Metadatos seguros de la respuesta, aptos sólo para inicio_tecnico.log."""
+    cabeceras = getattr(respuesta, "headers", {}) or {}
+    tipo_contenido = cabeceras.get("Content-Type", "") if hasattr(cabeceras, "get") else ""
+    detalle = {
+        "http": getattr(respuesta, "status_code", "?"),
+        "url": url_segura(getattr(respuesta, "url", "")),
+        "content_type": _texto_sanitizado(tipo_contenido, api_key, 120) or "SIN_CONTENT_TYPE",
+        "redirecciones": _cadena_redirecciones(respuesta),
+    }
+    if incluir_muestra:
+        try:
+            muestra = getattr(respuesta, "text", "")
+        except Exception as error:  # Un mock o stream no debe ocultar el diagnóstico.
+            muestra = f"LECTURA_CUERPO_{type(error).__name__}"
+        detalle["muestra"] = _texto_sanitizado(muestra, api_key)
+    return detalle
+
+
+def diagnostico_error_coordinador(error):
+    """Resume causa y contexto sin revelar API_KEY ni contenido funcional."""
+    api_key = getattr(error, "_api_key", None)
+    partes = [
+        f"exc={type(error).__name__}",
+        f"mensaje={_texto_sanitizado(error, api_key, 180)}",
+    ]
+    causa = error.__cause__
+    if causa is not None:
+        partes.append(
+            f"causa={type(causa).__name__}:{_texto_sanitizado(causa, api_key, 180)}"
+        )
+    for clave, valor in getattr(error, "diagnostico", {}).items():
+        partes.append(f"{clave}={_texto_sanitizado(valor, api_key, 350)}")
+    return " ".join(partes)
 
 
 def enviar_evento_coordinador(evento, configuracion, post=None,
@@ -33,24 +129,49 @@ def enviar_evento_coordinador(evento, configuracion, post=None,
         datos = json.loads(evento.get("datos_json") or "{}")
     except (TypeError, ValueError) as error:
         raise ErrorCoordinador("DATOS_EVENTO_INVALIDOS") from error
-    respuesta = (post or requests.post)(url, json={
+    payload = {
         "api_key": api_key, "id_evento": evento["id_evento"],
         "tipo_evento": evento["tipo_evento"],
         "matricula": evento.get("matricula") or "", "nombre": evento.get("nombre") or "",
         "laptop_id": evento.get("laptop_id") or "", "equipo_origen": evento.get("equipo") or "",
         "fecha_evento": evento.get("fecha_evento") or "", "hora_evento": evento.get("hora_evento") or "",
         "fecha_creacion": evento.get("fecha_creacion") or "", "datos": datos,
-    }, timeout=timeout)
+    }
+    try:
+        # Google Apps Script suele devolver una redirección tras ejecutar doPost.
+        # Se declara explícitamente para poder diagnosticar su cadena en la respuesta.
+        respuesta = (post or requests.post)(
+            url, json=payload, timeout=timeout, allow_redirects=True,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+    except requests.RequestException as error:
+        raise ErrorCoordinador(
+            "SOLICITUD_COORDINADOR_FALLIDA",
+            {"url": url_segura(url), "causa": type(error).__name__},
+            api_key,
+        ) from error
     if getattr(respuesta, "status_code", 200) != 200:
-        raise ErrorCoordinador(f"HTTP_{getattr(respuesta, 'status_code', 'ERROR')}")
+        raise ErrorCoordinador(
+            f"HTTP_{getattr(respuesta, 'status_code', 'ERROR')}",
+            diagnostico_respuesta_coordinador(respuesta, api_key, incluir_muestra=True),
+            api_key,
+        )
     try:
         contenido = respuesta.json()
     except (ValueError, TypeError) as error:
-        raise ErrorCoordinador("RESPUESTA_COORDINADOR_INVALIDA") from error
+        raise ErrorCoordinador(
+            "RESPUESTA_COORDINADOR_INVALIDA",
+            diagnostico_respuesta_coordinador(respuesta, api_key, incluir_muestra=True),
+            api_key,
+        ) from error
     if isinstance(contenido, dict) and contenido.get("estado") in ("APLICADO", "YA_APLICADO"):
         return contenido.get("referencia_registro") or "COORDINADOR"
     codigo = contenido.get("codigo") if isinstance(contenido, dict) else None
-    raise ErrorCoordinador(str(codigo or "ERROR_COORDINADOR")[:120])
+    raise ErrorCoordinador(
+        str(codigo or "ERROR_COORDINADOR")[:120],
+        diagnostico_respuesta_coordinador(respuesta, api_key),
+        api_key,
+    )
 
 
 class SincronizadorContingencia:
@@ -131,7 +252,7 @@ class SincronizadorContingencia:
                         self.registrar(
                             "SINCRONIZACION_EVENTO_ERROR "
                             f"id={evento['id_evento']} tipo={evento['tipo_evento']} "
-                            f"error={type(error).__name__}"
+                            f"{diagnostico_error_coordinador(error)}"
                         )
         finally:
             self._lock.release()

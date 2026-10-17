@@ -71,6 +71,16 @@ class PruebasConfiguracionSincronizacion(unittest.TestCase):
         self.assertTrue(actualizada)
         self.assertEqual(configuracion["VERSION_CONFIG"], "2")
 
+    def test_rechaza_url_que_no_es_endpoint_exec_sin_query_ni_fragmento(self):
+        for url in (
+            "https://script.google.com/macros/s/ejemplo/dev",
+            "https://script.google.com/macros/s/ejemplo/exec?token=secreto",
+            "https://script.google.com/macros/s/ejemplo/exec#fragmento",
+            "https://otro.example/macros/s/ejemplo/exec",
+        ):
+            configuracion = dict(CONFIG, URL_APPS_SCRIPT=url)
+            self.assertFalse(guardar_configuracion_local(self.directorio, configuracion))
+
     def test_archivo_local_esta_ignorado_por_git(self):
         raiz = Path(__file__).parent
         resultado = subprocess.run(

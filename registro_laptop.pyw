@@ -29,7 +29,11 @@ from contingencia_local import (
     SHEETS_TIMEOUT,
     ContingenciaLocal,
 )
-from sincronizador_contingencia import SincronizadorContingencia, enviar_evento_coordinador
+from sincronizador_contingencia import (
+    SincronizadorContingencia,
+    diagnostico_error_coordinador,
+    enviar_evento_coordinador,
+)
 from sincronizacion_config import (
     actualizar_configuracion_desde_hoja,
     cargar_configuracion_local,
@@ -207,7 +211,7 @@ def enviar_evento_local_inmediato(id_evento):
         almacen_contingencia.incrementar_intentos(id_evento, type(error).__name__)
         registrar_evento_tecnico(
             f"COORDINADOR_EVENTO_PENDIENTE id={id_evento} tipo={evento['tipo_evento']} "
-            f"error={type(error).__name__}"
+            f"{diagnostico_error_coordinador(error)}"
         )
         return False
 
