@@ -71,12 +71,27 @@ class PruebasConfiguracionSincronizacion(unittest.TestCase):
         self.assertTrue(actualizada)
         self.assertEqual(configuracion["VERSION_CONFIG"], "2")
 
+    def test_acepta_url_normal_de_web_app_exec(self):
+        self.assertTrue(guardar_configuracion_local(self.directorio, CONFIG))
+
+    def test_acepta_url_workspace_de_web_app_exec(self):
+        configuracion = dict(
+            CONFIG,
+            URL_APPS_SCRIPT=(
+                "https://script.google.com/a/utparral.edu.mx/"
+                "macros/s/AKfycbx_123-abc/exec"
+            ),
+        )
+        self.assertTrue(guardar_configuracion_local(self.directorio, configuracion))
+        self.assertEqual(cargar_configuracion_local(self.directorio), configuracion)
+
     def test_rechaza_url_que_no_es_endpoint_exec_sin_query_ni_fragmento(self):
         for url in (
             "https://script.google.com/macros/s/ejemplo/dev",
             "https://script.google.com/macros/s/ejemplo/exec?token=secreto",
             "https://script.google.com/macros/s/ejemplo/exec#fragmento",
             "https://otro.example/macros/s/ejemplo/exec",
+            "https://script.google.com/a/utparral.edu.mx/macros/s/ejemplo/exec/extra",
         ):
             configuracion = dict(CONFIG, URL_APPS_SCRIPT=url)
             self.assertFalse(guardar_configuracion_local(self.directorio, configuracion))

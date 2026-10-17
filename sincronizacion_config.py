@@ -5,12 +5,18 @@ conectar y de forma periódica; el sincronizador usa siempre esta copia local.
 """
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
 ARCHIVO_CONFIGURACION_SINCRONIZACION = "sincronizacion_config.json"
 CLAVES_REQUERIDAS = ("URL_APPS_SCRIPT", "API_KEY", "VERSION_CONFIG")
+_RUTA_WEB_APP = re.compile(
+    r"^/(?:a/(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)/)?"
+    r"macros/s/[A-Za-z0-9_-]+/exec$"
+)
 
 
 def _ruta(directorio_app):
@@ -38,7 +44,7 @@ def validar_configuracion(configuracion):
         or url.password
         or url.query
         or url.fragment
-        or not url.path.rstrip("/").endswith("/exec")
+        or not _RUTA_WEB_APP.fullmatch(url.path)
     ):
         return None
     return resultado
