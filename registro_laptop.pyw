@@ -277,24 +277,18 @@ def obtener_sesion_local_activa(matricula=None):
         return None
 
 
-def recuperar_sesion_activa_al_iniciar():
-    """Muestra la devolución de la sesión SQLite que sobrevivió al reinicio."""
+def registrar_sesion_pendiente_al_iniciar():
+    """Detecta una sesión persistente sin exponerla ni modificarla en la UI."""
     sesion = obtener_sesion_local_activa()
     if not sesion:
-        registrar_evento_tecnico("RECUPERACION_SESION_LOCAL resultado=NO_ACTIVA")
-        return False
+        registrar_evento_tecnico("RECUPERACION_SESION_LOCAL resultado=NO_ACTIVA_UI_LOGIN")
+        return None
 
-    matricula = sesion["matricula"]
-    nombre = sesion["nombre"]
     registrar_evento_tecnico(
-        "RECUPERACION_SESION_LOCAL resultado=ACTIVA "
-        f"sesion={sesion['id_sesion']} matricula={matricula}"
+        "RECUPERACION_SESION_LOCAL resultado=ACTIVA_UI_LOGIN "
+        f"sesion={sesion['id_sesion']}"
     )
-    ventana.withdraw()
-    ventana.after_idle(
-        lambda: mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=True)
-    )
-    return True
+    return sesion
 
 
 def registrar_devolucion_contingencia(matricula):
@@ -385,21 +379,30 @@ def iniciar_sincronizacion_pendientes():
     threading.Thread(target=sincronizar_pendientes_en_segundo_plano, daemon=True).start()
 
 
-def cerrar_sesion_contingencia_por_nueva_sesion(matricula_anterior):
-    """Equivalente local del cierre automático; conserva ambos eventos pendientes."""
+def cerrar_sesion_contingencia_por_nueva_sesion(matricula_nueva):
+    """Resuelve en SQLite la sesión previa de otra matrícula y envía sus UUID."""
     if almacen_contingencia is None:
         return False
     try:
         fecha, hora = _fecha_hora_local()
         laptop_id = socket.gethostname()
-        almacen_contingencia.registrar_no_entrega_local(
-            matricula_anterior, laptop_id, fecha, hora
+        previa = obtener_sesion_local_activa()
+        if not previa:
+            return True
+        resultado = almacen_contingencia.resolver_sesion_activa_por_nueva_matricula(
+            laptop_id, matricula_nueva, fecha, hora, laptop_id,
+            registrar_no_entrega=not matricula_exenta_no_entrega(previa["matricula"]),
         )
-        almacen_contingencia.registrar_cierre_automatico_local(
-            matricula_anterior, laptop_id, fecha, hora
-        )
+        sesion = resultado.get("sesion")
+        if resultado["resultado"] != "SESION_ANTERIOR_CERRADA":
+            return resultado["resultado"] == "SIN_SESION"
+        for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+            id_evento = sesion.get(campo)
+            if id_evento:
+                enviar_evento_local_inmediato(id_evento)
         registrar_evento_tecnico(
-            f"CONTINGENCIA_CIERRE_AUTOMATICO matricula={matricula_anterior}"
+            "CONTINGENCIA_CIERRE_AUTOMATICO "
+            f"matricula_anterior={sesion['matricula']} matricula_nueva={matricula_nueva}"
         )
         return True
     except Exception as error:
@@ -2985,7 +2988,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
 
 
-def mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=False):
+def mostrar_ventana_entrega(nombre, matricula):
     global ventana_entrega_activa
 
     ventana_entrega = tk.Toplevel()
@@ -3049,18 +3052,6 @@ def mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=False):
         justify="center",
         wraplength=340
     ).pack(pady=(0, 25))
-
-    if sesion_recuperada:
-        tk.Label(
-            frame_principal,
-            text="Esta laptop tiene un préstamo activo.\nRegistra la entrega para terminar.",
-            font=FUENTE_CUERPO_BOLD,
-            fg=COLOR_ADVERTENCIA,
-            bg=COLOR_TARJETA,
-            justify="center",
-            wraplength=340
-        ).pack(pady=(0, 5))
-
 
     # Botón principal
     def iniciar_devolucion_desde_boton():
@@ -3174,7 +3165,6 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
 def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
                                 modo_contingencia=False, persona_cache=None):
     global entrada, ventana, procesando_sesion
-    sesion_contingencia_previa = {"valor": None}
 
     if not identidad_confirmada:
         activar_timeout_inactividad()
@@ -3199,6 +3189,37 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             ejecutar_en_ui(procesar_sesion, "ok", *resultado)
         except ErrorConsultaGoogle:
             ejecutar_en_ui(procesar_sesion, "error", False, None)
+
+    def resolver_sesion_local():
+        previa = obtener_sesion_local_activa()
+        if not previa:
+            ejecutar_en_ui(procesar_sesion_local, "sin_sesion", None)
+            return
+        if previa["matricula"] == str(matricula).strip():
+            ejecutar_en_ui(procesar_sesion_local, "misma_matricula", previa)
+            return
+        exito = cerrar_sesion_contingencia_por_nueva_sesion(matricula)
+        ejecutar_en_ui(procesar_sesion_local, "sesion_anterior_cerrada" if exito else "error", previa)
+
+    def procesar_sesion_local(resultado, sesion):
+        global procesando_sesion
+        if resultado == "misma_matricula":
+            registrar_evento_tecnico(
+                "RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA "
+                f"sesion={sesion['id_sesion']} matricula={matricula}"
+            )
+            procesando_sesion = False
+            ventana.withdraw()
+            ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
+            return
+        if resultado == "error":
+            mostrar_error(
+                "Error",
+                "No se pudo resolver la sesión anterior.\n\nIntenta nuevamente."
+            )
+            reiniciar_estado_sistema()
+            return
+        iniciar_validacion_identidad()
 
     def procesar_sesion(resultado_consulta, sesion_activa, laptop_otro):
         if resultado_consulta == "error":
@@ -3232,21 +3253,13 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             threading.Thread(target=cerrar_sesion_anterior, daemon=True).start()
             return
 
-        iniciar_validacion_identidad()
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
 
     def cerrar_sesion_anterior():
-        if modo_contingencia:
-            previa = sesion_contingencia_previa["valor"]
-            exito = bool(
-                previa and cerrar_sesion_contingencia_por_nueva_sesion(
-                    previa["matricula"]
-                )
-            )
-        else:
-            try:
-                exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
-            except ErrorConsultaGoogle:
-                exito = False
+        try:
+            exito = cerrar_sesion_anterior_y_contar_no_entrega(matricula)
+        except ErrorConsultaGoogle:
+            exito = False
         ejecutar_en_ui(procesar_cierre_anterior, exito)
 
     def procesar_cierre_anterior(exito):
@@ -3257,7 +3270,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             )
             reiniciar_estado_sistema()
             return
-        iniciar_validacion_identidad()
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
 
     def iniciar_validacion_identidad():
         cambiar_estado("Validando identidad...", COLOR_ADVERTENCIA)
@@ -3484,14 +3497,11 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
         ventana.withdraw()
         ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
 
-    if modo_contingencia:
-        sesion_contingencia_previa["valor"] = obtener_sesion_local_activa()
-        previa = sesion_contingencia_previa["valor"]
-        procesar_sesion(
-            "ok",
-            bool(previa and previa["matricula"] != str(matricula).strip()),
-            previa["laptop_id"] if previa else None,
-        )
+    sesion_local = obtener_sesion_local_activa()
+    if modo_contingencia or (
+        sesion_local and sesion_local["matricula"] == str(matricula).strip()
+    ):
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
     else:
         threading.Thread(target=consultar_sesion, daemon=True).start()
     return True
@@ -3698,12 +3708,6 @@ def iniciar_sesion():
 
     if procesando_sesion:
         return
-
-    # Una sesión persistente siempre tiene prioridad sobre un préstamo nuevo,
-    # incluso si el login volvió a quedar visible después de un reinicio.
-    if recuperar_sesion_activa_al_iniciar():
-        return
-
 
     flujo_cancelado_por_inactividad = False
     procesando_sesion = True
@@ -4207,7 +4211,7 @@ ventana.configure(bg=COLOR_FONDO)
 
 # AQUÍ SE CREA EL LOGIN
 crear_pantalla_login()
-ventana.after_idle(recuperar_sesion_activa_al_iniciar)
+ventana.after_idle(registrar_sesion_pendiente_al_iniciar)
 
 # SEGURIDAD
 ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)

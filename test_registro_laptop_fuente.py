@@ -25,27 +25,35 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
             self.fuente,
         )
 
-    def test_arranque_recupera_sesion_local_y_muestra_devolucion(self):
-        self.assertIn("def recuperar_sesion_activa_al_iniciar():", self.fuente)
+    def test_arranque_detecta_sesion_local_y_conserva_login_de_matricula(self):
+        self.assertIn("def registrar_sesion_pendiente_al_iniciar():", self.fuente)
         self.assertIn('sesion = obtener_sesion_local_activa()', self.fuente)
         self.assertIn(
-            'lambda: mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=True)',
+            "RECUPERACION_SESION_LOCAL resultado=ACTIVA_UI_LOGIN",
             self.fuente,
         )
         self.assertIn(
-            "ventana.after_idle(recuperar_sesion_activa_al_iniciar)", self.fuente,
+            "ventana.after_idle(registrar_sesion_pendiente_al_iniciar)", self.fuente,
         )
+        recuperacion = self.fuente.split(
+            "def registrar_sesion_pendiente_al_iniciar():", 1
+        )[1].split("def registrar_devolucion_contingencia", 1)[0]
+        self.assertNotIn("ventana.withdraw()", recuperacion)
+        self.assertNotIn("mostrar_ventana_entrega", recuperacion)
 
-    def test_login_no_inicia_otro_prestamo_si_hay_sesion_local_activa(self):
-        inicio_sesion = self.fuente.split("def iniciar_sesion():", 1)[1].split(
-            "def crear_pantalla_login():", 1
-        )[0]
-        self.assertIn("if recuperar_sesion_activa_al_iniciar():", inicio_sesion)
-        self.assertIn("if recuperar_sesion_activa_al_iniciar():\n        return", inicio_sesion)
+    def test_misma_matricula_reutiliza_sesion_y_muestra_entrega(self):
+        self.assertIn('resultado == "misma_matricula"', self.fuente)
+        self.assertIn("RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA", self.fuente)
+        self.assertIn("lambda: mostrar_ventana_entrega(nombre, matricula)", self.fuente)
 
-    def test_ventana_recuperada_indica_prestamo_activo_y_ofrece_entrega(self):
-        self.assertIn("def mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=False):", self.fuente)
-        self.assertIn("Esta laptop tiene un préstamo activo.", self.fuente)
+    def test_matricula_diferente_resuelve_sesion_por_sqlite_y_apps_script(self):
+        self.assertIn("cerrar_sesion_contingencia_por_nueva_sesion(matricula)", self.fuente)
+        self.assertIn("resolver_sesion_activa_por_nueva_matricula(", self.fuente)
+        self.assertIn("enviar_evento_local_inmediato(id_evento)", self.fuente)
+        self.assertIn("registrar_no_entrega=not matricula_exenta_no_entrega", self.fuente)
+
+    def test_devolucion_normal_sigue_disponible(self):
+        self.assertIn("def mostrar_ventana_entrega(nombre, matricula):", self.fuente)
         self.assertIn('text="ENTREGAR Y APAGAR"', self.fuente)
 
 

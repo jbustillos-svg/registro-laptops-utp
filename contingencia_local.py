@@ -256,7 +256,7 @@ class ContingenciaLocal:
 
     @staticmethod
     def _ahora():
-        return datetime.now().astimezone().isoformat(timespec="seconds")
+        return datetime.now().astimezone().isoformat(timespec="microseconds")
 
     def upsert_persona(
         self, matricula, nombre=None, rol=None, curp_ultimos_2=None, estado=None,
@@ -586,6 +586,31 @@ class ContingenciaLocal:
             "CIERRE_AUTOMATICO_POR_NUEVA_SESION",
         )
 
+    def resolver_sesion_activa_por_nueva_matricula(
+        self, laptop_id, matricula, fecha_evento, hora_evento, equipo=None,
+        registrar_no_entrega=True,
+    ):
+        """Conserva la misma sesión o cierra la anterior para otro alumno.
+
+        La resolución ocurre en SQLite antes de que el llamador envíe los UUID
+        persistidos al coordinador; repetirla no genera eventos duplicados.
+        """
+        sesion = self.obtener_sesion_activa(laptop_id)
+        if not sesion:
+            return {"resultado": "SIN_SESION", "sesion": None}
+        if sesion["matricula"] == str(matricula).strip():
+            return {"resultado": "MISMA_MATRICULA", "sesion": sesion}
+
+        matricula_anterior = sesion["matricula"]
+        if registrar_no_entrega:
+            self.registrar_no_entrega_local(
+                matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo
+            )
+        cerrada = self.registrar_cierre_automatico_local(
+            matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo
+        )
+        return {"resultado": "SESION_ANTERIOR_CERRADA", "sesion": cerrada}
+
     def _cerrar_sesion_local(self, matricula, laptop_id, fecha_evento, hora_evento,
                               equipo, columna_evento, tipo_evento, observacion):
         with self._conexion() as conexion:
@@ -605,7 +630,9 @@ class ContingenciaLocal:
                 if id_evento:
                     conexion.commit()
                     return self._fila_a_dict(sesion)
-                id_evento = str(uuid.uuid4())
+                id_evento = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"utp-v141:{tipo_evento}:{sesion['id_sesion']}"
+                ))
                 conexion.execute(
                     f"""
                     UPDATE sesiones_locales

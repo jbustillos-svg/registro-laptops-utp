@@ -230,6 +230,75 @@ class PruebasContingenciaLocal(unittest.TestCase):
         reiniciado = ContingenciaLocal(self.temporal.name)
         self.assertIsNone(reiniciado.obtener_sesion_activa("LAP-1"))
 
+    def test_reinicio_con_sesion_activa_no_genera_no_entrega(self):
+        self.almacen.inicializar()
+        creada = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+
+        reiniciado = ContingenciaLocal(self.temporal.name)
+        pendiente = reiniciado.obtener_sesion_activa("LAP-1")
+        self.assertEqual(pendiente["id_sesion"], creada["id_sesion"])
+        self.assertEqual(
+            [evento["tipo_evento"] for evento in reiniciado.obtener_eventos_pendientes()],
+            ["PRESTAMO"],
+        )
+
+    def test_misma_matricula_tras_reinicio_reutiliza_sesion_sin_nuevo_prestamo(self):
+        self.almacen.inicializar()
+        creada = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+
+        reiniciado = ContingenciaLocal(self.temporal.name)
+        resultado = reiniciado.resolver_sesion_activa_por_nueva_matricula(
+            "LAP-1", "A1", "2026-10-16", "10:00:00"
+        )
+        repetida = reiniciado.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "10:00:00"
+        )
+
+        self.assertEqual(resultado["resultado"], "MISMA_MATRICULA")
+        self.assertEqual(resultado["sesion"]["id_sesion"], creada["id_sesion"])
+        self.assertTrue(repetida["sesion_existente"])
+        self.assertEqual(repetida["id_sesion"], creada["id_sesion"])
+        self.assertEqual(
+            len([e for e in reiniciado.obtener_eventos_pendientes()
+                 if e["tipo_evento"] == "PRESTAMO"]),
+            1,
+        )
+
+    def test_matricula_diferente_cierra_una_vez_y_permite_prestamo_offline(self):
+        self.almacen.inicializar()
+        self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+
+        reiniciado = ContingenciaLocal(self.temporal.name)
+        cerrado = reiniciado.resolver_sesion_activa_por_nueva_matricula(
+            "LAP-1", "B1", "2026-10-16", "10:00:00"
+        )
+        reintento = reiniciado.resolver_sesion_activa_por_nueva_matricula(
+            "LAP-1", "B1", "2026-10-16", "10:01:00"
+        )
+        nuevo = reiniciado.registrar_prestamo_offline(
+            "B1", "Beto", "LAP-1", "2026-10-16", "10:02:00"
+        )
+
+        self.assertEqual(cerrado["resultado"], "SESION_ANTERIOR_CERRADA")
+        self.assertEqual(cerrado["sesion"]["matricula"], "A1")
+        self.assertEqual(cerrado["sesion"]["observacion"], "CIERRE_AUTOMATICO_POR_NUEVA_SESION")
+        self.assertEqual(reintento["resultado"], "SIN_SESION")
+        eventos = reiniciado.obtener_eventos_pendientes()
+        self.assertEqual(
+            len([e for e in eventos if e["tipo_evento"] == "NO_ENTREGA"]), 1
+        )
+        self.assertEqual(
+            len([e for e in eventos if e["tipo_evento"] == "CIERRE_AUTOMATICO"]), 1
+        )
+        self.assertEqual(nuevo["matricula"], "B1")
+        self.assertEqual(reiniciado.obtener_sesion_activa("LAP-1")["matricula"], "B1")
+
     def test_devolucion_tras_reinicio_reutiliza_la_sesion_activa_correcta(self):
         self.almacen.inicializar()
         creada = self.almacen.registrar_prestamo_coordinador(
