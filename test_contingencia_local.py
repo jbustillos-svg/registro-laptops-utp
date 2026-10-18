@@ -220,6 +220,34 @@ class PruebasContingenciaLocal(unittest.TestCase):
                 "B1", "Beto", "LAP-1", "2026-10-16", "11:00:00"
             )
 
+    def test_sesion_cerrada_tras_reinicio_no_se_recupera_para_devolucion(self):
+        self.almacen.inicializar()
+        self.almacen.registrar_prestamo_online(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        self.almacen.registrar_devolucion_online("A1", "LAP-1", "10:00:00")
+
+        reiniciado = ContingenciaLocal(self.temporal.name)
+        self.assertIsNone(reiniciado.obtener_sesion_activa("LAP-1"))
+
+    def test_devolucion_tras_reinicio_reutiliza_la_sesion_activa_correcta(self):
+        self.almacen.inicializar()
+        creada = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+
+        reiniciado = ContingenciaLocal(self.temporal.name)
+        recuperada = reiniciado.obtener_sesion_activa("LAP-1")
+        self.assertEqual(recuperada["id_sesion"], creada["id_sesion"])
+        self.assertEqual((recuperada["matricula"], recuperada["nombre"]), ("A1", "Ana"))
+
+        cerrada = reiniciado.registrar_devolucion_offline(
+            "A1", "LAP-1", "2026-10-16", "10:00:00"
+        )
+        self.assertEqual(cerrada["id_sesion"], creada["id_sesion"])
+        self.assertEqual(cerrada["hora_salida"], "10:00:00")
+        self.assertIsNone(reiniciado.obtener_sesion_activa("LAP-1"))
+
     def test_error_sqlite_revierte_sesion_y_evento_de_prestamo(self):
         self.almacen.inicializar()
         with self.almacen._conexion() as conexion:

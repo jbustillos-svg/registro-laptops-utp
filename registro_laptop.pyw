@@ -277,6 +277,26 @@ def obtener_sesion_local_activa(matricula=None):
         return None
 
 
+def recuperar_sesion_activa_al_iniciar():
+    """Muestra la devolución de la sesión SQLite que sobrevivió al reinicio."""
+    sesion = obtener_sesion_local_activa()
+    if not sesion:
+        registrar_evento_tecnico("RECUPERACION_SESION_LOCAL resultado=NO_ACTIVA")
+        return False
+
+    matricula = sesion["matricula"]
+    nombre = sesion["nombre"]
+    registrar_evento_tecnico(
+        "RECUPERACION_SESION_LOCAL resultado=ACTIVA "
+        f"sesion={sesion['id_sesion']} matricula={matricula}"
+    )
+    ventana.withdraw()
+    ventana.after_idle(
+        lambda: mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=True)
+    )
+    return True
+
+
 def registrar_devolucion_contingencia(matricula):
     if almacen_contingencia is None:
         return False
@@ -2965,7 +2985,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
 
 
-def mostrar_ventana_entrega(nombre, matricula):
+def mostrar_ventana_entrega(nombre, matricula, sesion_recuperada=False):
     global ventana_entrega_activa
 
     ventana_entrega = tk.Toplevel()
@@ -3029,6 +3049,17 @@ def mostrar_ventana_entrega(nombre, matricula):
         justify="center",
         wraplength=340
     ).pack(pady=(0, 25))
+
+    if sesion_recuperada:
+        tk.Label(
+            frame_principal,
+            text="Esta laptop tiene un préstamo activo.\nRegistra la entrega para terminar.",
+            font=FUENTE_CUERPO_BOLD,
+            fg=COLOR_ADVERTENCIA,
+            bg=COLOR_TARJETA,
+            justify="center",
+            wraplength=340
+        ).pack(pady=(0, 5))
 
 
     # Botón principal
@@ -3668,6 +3699,11 @@ def iniciar_sesion():
     if procesando_sesion:
         return
 
+    # Una sesión persistente siempre tiene prioridad sobre un préstamo nuevo,
+    # incluso si el login volvió a quedar visible después de un reinicio.
+    if recuperar_sesion_activa_al_iniciar():
+        return
+
 
     flujo_cancelado_por_inactividad = False
     procesando_sesion = True
@@ -4171,6 +4207,7 @@ ventana.configure(bg=COLOR_FONDO)
 
 # AQUÍ SE CREA EL LOGIN
 crear_pantalla_login()
+ventana.after_idle(recuperar_sesion_activa_al_iniciar)
 
 # SEGURIDAD
 ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)
