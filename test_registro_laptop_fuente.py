@@ -1,4 +1,6 @@
+import ast
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 
@@ -143,6 +145,35 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("if exito:", espera)
         self.assertIn("if not sesion:\n            return False", espera)
         self.assertIn("state=\"disabled\"", self.fuente)
+
+    def test_atajo_global_ctrl_alt_u_reconoce_mayusculas_y_minusculas(self):
+        arbol = ast.parse(self.fuente.lstrip("\ufeff"))
+        funcion = next(
+            nodo for nodo in arbol.body
+            if isinstance(nodo, ast.FunctionDef) and nodo.name == "es_atajo_administrativo"
+        )
+        modulo = ast.Module(body=[funcion], type_ignores=[])
+        espacio = {}
+        exec(compile(ast.fix_missing_locations(modulo), "<atajo>", "exec"), espacio)
+
+        detectar = espacio["es_atajo_administrativo"]
+        for tecla in ("u", "U"):
+            self.assertTrue(detectar(SimpleNamespace(keysym=tecla, state=0x0004 | 0x0008)))
+        self.assertFalse(detectar(SimpleNamespace(keysym="u", state=0x0004)))
+        self.assertFalse(detectar(SimpleNamespace(keysym="u", state=0x0008)))
+
+    def test_atajo_usa_un_solo_binding_global_y_respeta_contexto_proximidad(self):
+        self.assertIn('ventana.bind_all("<KeyPress>", manejar_tecla_global)', self.fuente)
+        self.assertNotIn('ventana.bind_all("<Control-Alt-u>"', self.fuente)
+        manejador = self.fuente.split("def manejar_atajo_administrativo(event=None):", 1)[1].split(
+            "def crear_modal_verificacion_ubicacion", 1
+        )[0]
+        self.assertIn("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD", manejador)
+        self.assertIn("CONTINGENCIA_PROXIMIDAD_ABIERTA", manejador)
+        self.assertIn("ATAJO_ADMIN_DETECTADO contexto=LOGIN", manejador)
+        self.assertIn("ESTADO_NO_DETECTADO, ESTADO_ERROR", manejador)
+        self.assertIn("if confirmacion_contingencia_abierta:", manejador)
+        self.assertIn('return "break"', manejador)
 
 
 if __name__ == "__main__":

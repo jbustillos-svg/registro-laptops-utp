@@ -1267,6 +1267,26 @@ def finalizar_contexto_contingencia():
     return autorizado
 
 
+def es_atajo_administrativo(event):
+    """Reconoce Ctrl+Alt+U sin depender de la variante de keysym de Windows."""
+    try:
+        return (
+            str(getattr(event, "keysym", "")).lower() == "u"
+            and bool(getattr(event, "state", 0) & 0x0004)  # Control
+            and bool(getattr(event, "state", 0) & 0x0008)  # Alt
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def manejar_tecla_global(event):
+    """Único binding global: funciona también dentro de Toplevels con grab_set."""
+    registrar_actividad_usuario(event)
+    if es_atajo_administrativo(event):
+        return manejar_atajo_administrativo(event)
+    return None
+
+
 def manejar_atajo_administrativo(event=None):
     global confirmacion_contingencia_abierta
 
@@ -1276,7 +1296,9 @@ def manejar_atajo_administrativo(event=None):
             return "break"
 
         confirmacion_contingencia_abierta = True
+        registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD")
         try:
+            registrar_evento_tecnico("CONTINGENCIA_PROXIMIDAD_ABIERTA")
             continuar = mostrar_confirmacion_personalizada(
                 "Continuar sin verificación",
                 "No fue posible detectar el carrito.\n"
@@ -1302,6 +1324,7 @@ def manejar_atajo_administrativo(event=None):
         if widget_con_foco:
             ventana_con_foco = widget_con_foco.winfo_toplevel()
             if ventana_con_foco == ventana:
+                registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=LOGIN")
                 return abrir_acceso_administrativo(event, parent=ventana)
             if (
                 ventana_entrega_activa is not None
@@ -4365,8 +4388,7 @@ registrar_evento_tecnico(
 )
 inicializar_infraestructura_contingencia()
 ventana = tk.Tk()
-ventana.bind_all("<Control-Alt-u>", manejar_atajo_administrativo)
-ventana.bind_all("<KeyPress>", registrar_actividad_usuario, add="+")
+ventana.bind_all("<KeyPress>", manejar_tecla_global)
 ventana.bind_all("<ButtonPress>", registrar_actividad_usuario, add="+")
 ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | v{VERSION_SISTEMA}")
 
