@@ -80,6 +80,8 @@ configuracion_sincronizacion_lock = threading.Lock()
 dialogo_admin_abierto = False
 contexto_contingencia_proximidad = None
 confirmacion_contingencia_abierta = False
+atajo_administrativo_en_curso = False
+ultimo_atajo_administrativo = 0.0
 registro_contingencias_sesion = []
 ventana_entrega_activa = None
 almacen_contingencia = None
@@ -822,6 +824,7 @@ def _crear_dialogo_personalizado(titulo, mensaje, tipo, parent, texto_destacado=
     parent = parent or ventana
 
     dialogo = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(dialogo)
     dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_FONDO)
@@ -1041,6 +1044,7 @@ def mostrar_exito(titulo, mensaje, parent=None):
 
 
 def mostrar_fallo_proximidad(estado, parent=None, al_crear=None):
+    registrar_evento_tecnico(f"PROXIMIDAD_DIALOGO_ABIERTO estado={estado}")
     if estado == ESTADO_NO_DETECTADO:
         mostrar_error(
             "Carrito no detectado",
@@ -1064,7 +1068,7 @@ def mostrar_fallo_proximidad(estado, parent=None, al_crear=None):
         return
 
     mostrar_error(
-        "Ubicación no validada",
+        "Laptop fuera de la ubicación autorizada",
         "Para continuar, la laptop debe encontrarse dentro del área del carrito móvil.\n"
         "Acérquese al carrito e inténtelo nuevamente.",
         parent=parent,
@@ -1098,16 +1102,62 @@ def registrar_uso_contingencia(tipo_operacion, matricula):
         print(f"[CONTINGENCIA_ADMIN] No se pudo escribir el registro local: {error}")
 
 
-def abrir_acceso_administrativo(event=None, parent=None):
+def _widget_tk_vivo(widget):
+    if widget is None:
+        return False
+    try:
+        return bool(widget.winfo_exists())
+    except (tk.TclError, AttributeError):
+        return False
+
+
+def _restaurar_grab_administrativo(grab_anterior, foco_anterior):
+    """Devuelve control al modal previo si todavía existe."""
+    if not _widget_tk_vivo(grab_anterior):
+        return
+    try:
+        grab_anterior.grab_set()
+        if _widget_tk_vivo(foco_anterior):
+            foco_anterior.focus_set()
+        else:
+            grab_anterior.focus_force()
+        registrar_evento_tecnico("ADMIN_GRAB_RESTAURADO")
+    except tk.TclError:
+        pass
+
+
+def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO"):
     global dialogo_admin_abierto
 
     if dialogo_admin_abierto:
         return "break"
 
-    dialogo_admin_abierto = True
     parent = parent or ventana
+    registrar_evento_tecnico(f"ADMIN_DIALOGO_SOLICITADO contexto={contexto}")
 
-    dialogo = tk.Toplevel(parent)
+    grab_anterior = None
+    foco_anterior = None
+    try:
+        grab_anterior = ventana.grab_current()
+        foco_anterior = ventana.focus_get()
+    except tk.TclError:
+        pass
+
+    if _widget_tk_vivo(grab_anterior):
+        try:
+            grab_anterior.grab_release()
+            registrar_evento_tecnico("ADMIN_GRAB_TEMPORAL_LIBERADO")
+        except tk.TclError:
+            grab_anterior = None
+
+    dialogo_admin_abierto = True
+
+    try:
+        dialogo = tk.Toplevel(parent)
+    except Exception:
+        dialogo_admin_abierto = False
+        _restaurar_grab_administrativo(grab_anterior, foco_anterior)
+        raise
     dialogo.title("Cierre administrativo")
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
@@ -1168,7 +1218,7 @@ def abrir_acceso_administrativo(event=None, parent=None):
     botones.pack(fill=tk.X, pady=(18, 0))
     intentos_incorrectos = {"cantidad": 0}
 
-    def cerrar():
+    def cerrar(cancelado=True, restaurar=True):
         global dialogo_admin_abierto
         try:
             dialogo.grab_release()
@@ -1179,13 +1229,18 @@ def abrir_acceso_administrativo(event=None, parent=None):
         except tk.TclError:
             pass
         dialogo_admin_abierto = False
+        if cancelado:
+            registrar_evento_tecnico("ADMIN_DIALOGO_CANCELADO")
+        if restaurar:
+            _restaurar_grab_administrativo(grab_anterior, foco_anterior)
 
     def cerrar_sistema():
         global contexto_contingencia_proximidad
         global confirmacion_contingencia_abierta
         global ventana_entrega_activa
 
-        cerrar()
+        registrar_evento_tecnico("ADMIN_SALIDA_AUTORIZADA")
+        cerrar(cancelado=False, restaurar=False)
         contexto_contingencia_proximidad = None
         confirmacion_contingencia_abierta = False
         ventana_entrega_activa = None
@@ -1234,9 +1289,11 @@ def abrir_acceso_administrativo(event=None, parent=None):
     dialogo.protocol("WM_DELETE_WINDOW", cerrar)
     dialogo.bind("<Return>", lambda _evento: autenticar())
     dialogo.bind("<Escape>", lambda _evento: cerrar())
+    vincular_dispatcher_administrativo(dialogo)
     _centrar_dialogo(dialogo, parent, ancho_minimo=460, alto_minimo=285)
     dialogo.grab_set()
-    entrada_clave.focus_set()
+    entrada_clave.focus_force()
+    registrar_evento_tecnico("ADMIN_DIALOGO_ABIERTO")
     return "break"
 
 
@@ -1265,7 +1322,7 @@ def registrar_dialogo_fallo_contingencia(_dialogo, cerrar_dialogo):
             "CONTINGENCIA_ABIERTA_FLAG="
             f"{confirmacion_contingencia_abierta}"
         )
-        vincular_atajo_proximidad(_dialogo)
+        vincular_dispatcher_administrativo(_dialogo)
 
 
 def finalizar_contexto_contingencia():
@@ -1288,6 +1345,15 @@ def es_atajo_administrativo(event):
             # Tk usa Mod1 (0x0008), pero Windows también reporta Alt como 0x20000.
             and bool(estado & (0x0008 | 0x20000))
         )
+    except (TypeError, ValueError):
+        return False
+
+
+def es_atajo_salida_administrativa(event):
+    """Escape técnico independiente: Ctrl+Alt+Shift+U desde cualquier modal."""
+    try:
+        estado = int(getattr(event, "state", 0))
+        return es_atajo_administrativo(event) and bool(estado & 0x0001)
     except (TypeError, ValueError):
         return False
 
@@ -1323,115 +1389,198 @@ def registrar_tecla_proximidad(event):
     )
 
 
-def manejar_tecla_proximidad(event):
-    registrar_tecla_proximidad(event)
-    if es_atajo_administrativo(event):
-        return manejar_atajo_admin(event)
-    return None
-
-
-def vincular_atajo_proximidad(dialogo):
-    """El Toplevel con grab recibe el atajo aunque el binding del root no lo vea."""
-    dialogo.bind("<KeyPress>", manejar_tecla_proximidad, add="+")
-    dialogo.bind(
-        "<Control-Alt-u>",
-        lambda event: manejar_atajo_admin(event, combinacion_confirmada=True),
-        add="+",
-    )
-    dialogo.bind(
-        "<Control-Alt-U>",
-        lambda event: manejar_atajo_admin(event, combinacion_confirmada=True),
-        add="+",
-    )
-    dialogo.focus_force()
-
-
-def manejar_tecla_global(event):
-    """Binding del root y respaldo para ventanas que no son de proximidad."""
-    registrar_actividad_usuario(event)
-    registrar_tecla_proximidad(event)
-    if es_atajo_administrativo(event):
-        return manejar_atajo_admin(event)
-    return None
-
-
-def manejar_atajo_admin(event=None, combinacion_confirmada=False):
-    global confirmacion_contingencia_abierta
-
-    if event is not None:
-        registrar_tecla_proximidad(event)
-    if not combinacion_confirmada and event is not None and not es_atajo_administrativo(event):
-        return None
-
-    registrar_evento_tecnico("ATAJO_CTRL_ALT_U_DETECTADO")
-    contexto = contexto_contingencia_proximidad
-    if contexto:
-        estado = contexto.get("estado")
-        registrar_evento_tecnico(f"ESTADO_PROXIMIDAD_ACTUAL={estado}")
-        registrar_evento_tecnico(
-            f"CONTINGENCIA_ABIERTA_FLAG={confirmacion_contingencia_abierta}"
-        )
-        if estado not in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
-            registrar_evento_tecnico(
-                "ATAJO_CTRL_ALT_U_RECHAZADO "
-                f"motivo=estado_no_autorizado estado={estado}"
-            )
-            return "break"
-        if confirmacion_contingencia_abierta:
-            registrar_evento_tecnico(
-                "ATAJO_CTRL_ALT_U_RECHAZADO motivo=confirmacion_ya_abierta"
-            )
-            return "break"
-
-        confirmacion_contingencia_abierta = True
-        registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD")
-        try:
-            registrar_evento_tecnico("CONTINGENCIA_PROXIMIDAD_ABIERTA")
-            continuar = mostrar_confirmacion_personalizada(
-                "Continuar sin verificación",
-                "No fue posible detectar el carrito.\n"
-                "¿Desea continuar con el proceso sin validar la proximidad?",
-                parent=contexto["parent"]
-            )
-            if continuar:
-                contexto["autorizado"] = True
-                registrar_uso_contingencia(
-                    contexto["operacion"],
-                    contexto["matricula"]
-                )
-            cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
-            if cerrar_dialogo_fallo:
-                cerrar_dialogo_fallo()
-        finally:
-            confirmacion_contingencia_abierta = False
-        return "break"
-
+def _contexto_visual_administrativo(event=None, origen=None):
+    """Resuelve el Toplevel activo sin limitarse al root o a la entrega."""
+    candidatos = [origen, getattr(event, "widget", None) if event else None]
     try:
-        widget_origen = getattr(event, "widget", None) if event else None
-        widget_con_foco = widget_origen or ventana.focus_get()
-        if widget_con_foco:
-            ventana_con_foco = widget_con_foco.winfo_toplevel()
-            if ventana_con_foco == ventana:
-                registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=LOGIN")
-                return abrir_acceso_administrativo(event, parent=ventana)
-            if (
-                ventana_entrega_activa is not None
-                and ventana_entrega_activa.winfo_exists()
-                and ventana_con_foco == ventana_entrega_activa
-            ):
-                return abrir_acceso_administrativo(
-                    event,
-                    parent=ventana_entrega_activa
-                )
+        candidatos.extend((ventana.grab_current(), ventana.focus_get()))
     except tk.TclError:
         pass
 
+    for candidato in candidatos:
+        if not _widget_tk_vivo(candidato):
+            continue
+        try:
+            return candidato.winfo_toplevel()
+        except tk.TclError:
+            continue
+    return ventana
+
+
+def _accion_atajo_administrativo(estado_proximidad):
+    """Separa la contingencia de proximidad de la salida administrativa."""
+    if estado_proximidad in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
+        return "CONTINGENCIA_PROXIMIDAD"
+    return "SALIDA_ADMINISTRATIVA"
+
+
+def _solicitar_contingencia_proximidad(contexto):
+    global confirmacion_contingencia_abierta
+
+    estado = contexto.get("estado")
+    registrar_evento_tecnico(
+        f"CONTINGENCIA_PROXIMIDAD_SOLICITADA estado={estado}"
+    )
+    if confirmacion_contingencia_abierta:
+        registrar_evento_tecnico(
+            "ATAJO_CTRL_ALT_U_RECHAZADO motivo=confirmacion_ya_abierta"
+        )
+        return "break"
+
+    confirmacion_contingencia_abierta = True
+    try:
+        dialogo_fallo = contexto.get("dialogo")
+        parent = dialogo_fallo if _widget_tk_vivo(dialogo_fallo) else contexto["parent"]
+        continuar = mostrar_confirmacion_personalizada(
+            "Continuar sin verificación",
+            "No fue posible detectar el carrito.\n"
+            "¿Desea continuar con el proceso sin validar la proximidad?",
+            parent=parent,
+        )
+        if continuar:
+            contexto["autorizado"] = True
+            registrar_uso_contingencia(
+                contexto["operacion"],
+                contexto["matricula"],
+            )
+        cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
+        if cerrar_dialogo_fallo:
+            cerrar_dialogo_fallo()
+    finally:
+        confirmacion_contingencia_abierta = False
     return "break"
 
 
-def manejar_atajo_administrativo(event=None):
-    """Compatibilidad para llamadas existentes; la lógica vive en un único manejador."""
-    return manejar_atajo_admin(event)
+def _solicitar_salida_administrativa(event, origen, contexto):
+    parent = _contexto_visual_administrativo(event, origen)
+    return abrir_acceso_administrativo(
+        event,
+        parent=parent,
+        contexto=contexto,
+    )
+
+
+def manejar_evento_administrativo(
+    event,
+    origen=None,
+    combinacion_confirmada=False,
+    forzar_salida=False,
+):
+    """Entrada común para bindings directos y el respaldo global."""
+    registrar_tecla_proximidad(event)
+    forzar_salida = forzar_salida or es_atajo_salida_administrativa(event)
+    if forzar_salida or combinacion_confirmada or es_atajo_administrativo(event):
+        return manejar_atajo_administrativo(
+            event,
+            origen=origen,
+            combinacion_confirmada=combinacion_confirmada,
+            forzar_salida=forzar_salida,
+        )
+    return None
+
+
+def vincular_dispatcher_administrativo(widget):
+    """Da a cada root/Toplevel acceso directo al dispatcher central."""
+    if getattr(widget, "_dispatcher_admin_vinculado", False):
+        return
+    widget._dispatcher_admin_vinculado = True
+    widget.bind(
+        "<KeyPress>",
+        lambda event, origen=widget: manejar_evento_administrativo(event, origen),
+        add="+",
+    )
+    # Estos bindings cubren la traducción nativa de Tk; KeyPress cubre las
+    # variantes de state (Alt 0x0008 / 0x20000) observadas en Windows.
+    for secuencia in ("<Control-Alt-u>", "<Control-Alt-U>"):
+        widget.bind(
+            secuencia,
+            lambda event, origen=widget: manejar_evento_administrativo(
+                event,
+                origen,
+                combinacion_confirmada=True,
+            ),
+            add="+",
+        )
+    for secuencia in ("<Control-Alt-Shift-u>", "<Control-Alt-Shift-U>"):
+        widget.bind(
+            secuencia,
+            lambda event, origen=widget: manejar_evento_administrativo(
+                event,
+                origen,
+                combinacion_confirmada=True,
+                forzar_salida=True,
+            ),
+            add="+",
+        )
+
+
+def manejar_tecla_global(event):
+    """Respaldo global; los modales críticos también tienen binding directo."""
+    registrar_actividad_usuario(event)
+    return manejar_evento_administrativo(event)
+
+
+def manejar_atajo_administrativo(
+    event=None,
+    origen=None,
+    combinacion_confirmada=False,
+    forzar_salida=False,
+):
+    global atajo_administrativo_en_curso
+    global ultimo_atajo_administrativo
+
+    if not combinacion_confirmada and event is not None and not es_atajo_administrativo(event):
+        return None
+
+    keysym = str(getattr(event, "keysym", "")) if event else ""
+    state = getattr(event, "state", "") if event else ""
+    registrar_evento_tecnico(f"TECLA_ADMIN_RECIBIDA keysym={keysym} state={state}")
+    registrar_evento_tecnico("ATAJO_CTRL_ALT_U_DETECTADO")
+    ahora = time.monotonic()
+    if atajo_administrativo_en_curso or ahora - ultimo_atajo_administrativo < 0.20:
+        registrar_evento_tecnico("ATAJO_ADMIN_OMITIDO motivo=doble_disparo")
+        return "break"
+
+    atajo_administrativo_en_curso = True
+    ultimo_atajo_administrativo = ahora
+    try:
+        contexto_proximidad = contexto_contingencia_proximidad
+        if contexto_proximidad and not forzar_salida:
+            estado = contexto_proximidad.get("estado")
+            registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD")
+            registrar_evento_tecnico(f"ESTADO_PROXIMIDAD_ACTUAL={estado}")
+            registrar_evento_tecnico(
+                f"CONTINGENCIA_ABIERTA_FLAG={confirmacion_contingencia_abierta}"
+            )
+            accion = _accion_atajo_administrativo(estado)
+            if accion == "CONTINGENCIA_PROXIMIDAD":
+                return _solicitar_contingencia_proximidad(contexto_proximidad)
+
+            registrar_evento_tecnico(
+                f"CONTINGENCIA_PROXIMIDAD_RECHAZADA estado={estado}"
+            )
+            return _solicitar_salida_administrativa(
+                event,
+                origen,
+                contexto=f"PROXIMIDAD_{estado}",
+            )
+
+        parent = _contexto_visual_administrativo(event, origen)
+        contexto = "LOGIN" if parent == ventana else "MODAL"
+        if forzar_salida and contexto_proximidad:
+            contexto = f"PROXIMIDAD_{contexto_proximidad.get('estado')}_SALIDA"
+        registrar_evento_tecnico(f"ATAJO_ADMIN_DETECTADO contexto={contexto}")
+        return _solicitar_salida_administrativa(event, parent, contexto)
+    finally:
+        atajo_administrativo_en_curso = False
+
+
+def manejar_atajo_admin(event=None, combinacion_confirmada=False):
+    """Alias temporal para integraciones que invocaban el nombre anterior."""
+    return manejar_atajo_administrativo(
+        event,
+        combinacion_confirmada=combinacion_confirmada,
+    )
 
 
 def crear_modal_verificacion_ubicacion(
@@ -1441,6 +1590,7 @@ def crear_modal_verificacion_ubicacion(
     estado="Intento 1 de 5"
 ):
     dialogo = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(dialogo)
     dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
@@ -1636,6 +1786,7 @@ def mostrar_ventana_control_unificada(
     estado
 ):
     ventana_ctrl = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(ventana_ctrl)
     registrar_ventana_flujo_alumno(ventana_ctrl)
     ventana_ctrl.title("Aviso importante")
     ventana_ctrl.resizable(False, False)
@@ -1740,6 +1891,7 @@ def mostrar_ventana_control_unificada(
     x = (pantalla_ancho - ancho) // 2
     y = (pantalla_alto - alto) // 2
     ventana_ctrl.geometry(f"{ancho}x{alto}+{x}+{y}")
+    ventana_ctrl.focus_force()
 
     # ESPERAR a que el usuario cierre la ventana
     ventana_ctrl.wait_window()
@@ -1916,6 +2068,7 @@ def obtener_control_alumno(matricula):
 
 def mostrar_instrucciones_iniciales(matricula=""):
     ventana_info = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(ventana_info)
     ventana_info.title("Instrucciones de Uso")
     ventana_info.resizable(False, False)
     ventana_info.configure(bg=COLOR_FONDO)
@@ -2530,6 +2683,7 @@ def validar_curp_ultimos_2(curp_real, curp_ingresada):
 def pedir_curp_ultimos_2(parent):
     activar_timeout_inactividad()
     ventana_curp = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(ventana_curp)
     registrar_ventana_flujo_alumno(ventana_curp)
     ventana_curp.title("Validación de identidad")
     ventana_curp.resizable(False, False)
@@ -3272,6 +3426,7 @@ def mostrar_ventana_entrega(nombre, matricula):
     global ventana_entrega_activa
 
     ventana_entrega = tk.Toplevel()
+    vincular_dispatcher_administrativo(ventana_entrega)
     ventana_entrega_activa = ventana_entrega
 
     def limpiar_referencia_entrega(event):
@@ -3827,6 +3982,7 @@ def mostrar_aviso_internet_bloqueante():
     except:
         aviso_internet = None
     aviso_internet = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(aviso_internet)
     aviso_internet.title("Conexión Requerida")
     
     # Hacer la ventana completamente bloqueante
@@ -3845,6 +4001,7 @@ def mostrar_aviso_internet_bloqueante():
     
     aviso_internet.geometry(f"{ancho_aviso}x{alto_aviso}+{x}+{y}")
     aviso_internet.configure(bg=COLOR_PRIMARIO)
+    aviso_internet.focus_force()
     
     # Frame principal
     frame_aviso = tk.Frame(aviso_internet, bg=COLOR_TARJETA, bd=0, relief=tk.FLAT)
@@ -4475,6 +4632,7 @@ registrar_evento_tecnico(
 )
 inicializar_infraestructura_contingencia()
 ventana = tk.Tk()
+vincular_dispatcher_administrativo(ventana)
 ventana.bind_all("<KeyPress>", manejar_tecla_global)
 ventana.bind_all("<ButtonPress>", registrar_actividad_usuario, add="+")
 ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | v{VERSION_SISTEMA}")
