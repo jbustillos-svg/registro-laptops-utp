@@ -279,9 +279,97 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("grab_anterior.grab_release()", admin)
         self.assertIn("ADMIN_GRAB_TEMPORAL_LIBERADO", admin)
         self.assertIn("_restaurar_grab_administrativo", admin)
-        self.assertIn("ADMIN_DIALOGO_CANCELADO", admin)
+        self.assertIn("ADMIN_SOLICITUD estado_guard=", admin)
         self.assertIn("ADMIN_DIALOGO_ABIERTO", admin)
         self.assertIn("entrada_clave.focus_force()", admin)
+
+    def test_cleanup_admin_es_unico_idempotente_y_timeout_lo_invoca(self):
+        cleanup = self.fuente.split("def finalizar_dialogo_administrativo", 1)[1].split(
+            "def abrir_acceso_administrativo", 1
+        )[0]
+        for traza in (
+            "ADMIN_DIALOGO_CIERRE motivo=",
+            "ADMIN_ESTADO_LIMPIADO",
+            "ADMIN_REAPERTURA_PERMITIDA",
+        ):
+            self.assertIn(traza, cleanup)
+        self.assertIn("after_cancel(after_id)", cleanup)
+        self.assertIn("dialogo_admin_abierto = False", cleanup)
+        self.assertIn("dialogo_admin_referencia = None", cleanup)
+        self.assertIn("dialogo_admin_estado = None", cleanup)
+        self.assertIn('finalizar_dialogo_administrativo("TIMEOUT", restaurar=False)', self.fuente)
+
+    def test_timeout_admin_limpia_guard_y_permite_tres_reaperturas(self):
+        modulo = self._funciones_ast(
+            "_widget_tk_vivo",
+            "finalizar_dialogo_administrativo",
+        )
+
+        class TclErrorFalso(Exception):
+            pass
+
+        logs = []
+        espacio = {
+            "tk": SimpleNamespace(TclError=TclErrorFalso),
+            "registrar_evento_tecnico": logs.append,
+            "_restaurar_grab_administrativo": lambda *_args: None,
+            "dialogo_admin_abierto": False,
+            "dialogo_admin_referencia": None,
+            "dialogo_admin_estado": None,
+        }
+        exec(compile(ast.fix_missing_locations(modulo), "<admin>", "exec"), espacio)
+
+        class DialogoFalso:
+            def __init__(self):
+                self.vivo = True
+                self.cancelados = []
+
+            def winfo_exists(self):
+                return self.vivo
+
+            def after_cancel(self, after_id):
+                self.cancelados.append(after_id)
+
+            def grab_release(self):
+                return None
+
+            def destroy(self):
+                self.vivo = False
+
+        for _ in range(3):
+            dialogo = DialogoFalso()
+            espacio["dialogo_admin_abierto"] = True
+            espacio["dialogo_admin_referencia"] = dialogo
+            espacio["dialogo_admin_estado"] = {
+                "dialogo": dialogo,
+                "grab_anterior": None,
+                "foco_anterior": None,
+                "after_pendientes": ["after-prueba"],
+                "finalizado": False,
+            }
+            self.assertTrue(
+                espacio["finalizar_dialogo_administrativo"]("TIMEOUT", restaurar=False)
+            )
+            self.assertFalse(espacio["dialogo_admin_abierto"])
+            self.assertIsNone(espacio["dialogo_admin_referencia"])
+            self.assertIsNone(espacio["dialogo_admin_estado"])
+            self.assertEqual(dialogo.cancelados, ["after-prueba"])
+            self.assertFalse(
+                espacio["finalizar_dialogo_administrativo"]("TIMEOUT", restaurar=False)
+            )
+
+        self.assertEqual(logs.count("ADMIN_REAPERTURA_PERMITIDA"), 3)
+
+    def test_todos_los_cierres_admin_pasan_por_cleanup_central(self):
+        admin = self.fuente.split("def abrir_acceso_administrativo", 1)[1].split(
+            "def iniciar_contexto_contingencia", 1
+        )[0]
+        self.assertIn('cerrar("AUTORIZADO", restaurar=False)', admin)
+        self.assertIn('cerrar("PASSWORD_INCORRECTA")', admin)
+        self.assertIn('lambda: cerrar("CANCELADO")', admin)
+        self.assertIn('lambda _evento: cerrar("CANCELADO")', admin)
+        self.assertIn('finalizar_dialogo_administrativo("DESTROY_PROGRAMATICO", dialogo=dialogo)', admin)
+        self.assertIn('dialogo.bind("<Destroy>", al_destruir, add="+")', admin)
 
     def test_restaurar_grab_tolera_modal_previo_destruido(self):
         modulo = self._funciones_ast("_widget_tk_vivo", "_restaurar_grab_administrativo")

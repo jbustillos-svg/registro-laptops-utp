@@ -78,6 +78,8 @@ actualizacion_lock = threading.Lock()
 sincronizacion_lock = threading.Lock()
 configuracion_sincronizacion_lock = threading.Lock()
 dialogo_admin_abierto = False
+dialogo_admin_referencia = None
+dialogo_admin_estado = None
 contexto_contingencia_proximidad = None
 confirmacion_contingencia_abierta = False
 atajo_administrativo_en_curso = False
@@ -1126,9 +1128,58 @@ def _restaurar_grab_administrativo(grab_anterior, foco_anterior):
         pass
 
 
-def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO"):
-    global dialogo_admin_abierto
+def finalizar_dialogo_administrativo(motivo="CANCELADO", restaurar=True, dialogo=None):
+    """Cierra idempotentemente el diálogo administrativo y libera su estado.
 
+    También se invoca si Tk destruye el diálogo indirectamente al destruir el
+    modal padre durante el timeout de inactividad.
+    """
+    global dialogo_admin_abierto, dialogo_admin_referencia, dialogo_admin_estado
+
+    estado = dialogo_admin_estado
+    if not estado or estado.get("finalizado"):
+        return False
+    if dialogo is not None and estado.get("dialogo") is not dialogo:
+        return False
+
+    estado["finalizado"] = True
+    dialogo = estado.get("dialogo")
+    for after_id in tuple(estado.get("after_pendientes", ())):
+        try:
+            dialogo.after_cancel(after_id)
+        except (tk.TclError, AttributeError):
+            pass
+    estado["after_pendientes"] = []
+
+    if _widget_tk_vivo(dialogo):
+        try:
+            dialogo.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            dialogo.destroy()
+        except tk.TclError:
+            pass
+
+    dialogo_admin_abierto = False
+    dialogo_admin_referencia = None
+    dialogo_admin_estado = None
+    registrar_evento_tecnico(f"ADMIN_DIALOGO_CIERRE motivo={motivo}")
+    registrar_evento_tecnico("ADMIN_ESTADO_LIMPIADO")
+    if restaurar:
+        _restaurar_grab_administrativo(
+            estado.get("grab_anterior"), estado.get("foco_anterior")
+        )
+    registrar_evento_tecnico("ADMIN_REAPERTURA_PERMITIDA")
+    return True
+
+
+def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO"):
+    global dialogo_admin_abierto, dialogo_admin_referencia, dialogo_admin_estado
+
+    registrar_evento_tecnico(
+        f"ADMIN_SOLICITUD estado_guard={dialogo_admin_abierto} contexto={contexto}"
+    )
     if dialogo_admin_abierto:
         return "break"
 
@@ -1150,14 +1201,21 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
         except tk.TclError:
             grab_anterior = None
 
-    dialogo_admin_abierto = True
-
     try:
         dialogo = tk.Toplevel(parent)
     except Exception:
         dialogo_admin_abierto = False
         _restaurar_grab_administrativo(grab_anterior, foco_anterior)
         raise
+    dialogo_admin_abierto = True
+    dialogo_admin_referencia = dialogo
+    dialogo_admin_estado = {
+        "dialogo": dialogo,
+        "grab_anterior": grab_anterior,
+        "foco_anterior": foco_anterior,
+        "after_pendientes": [],
+        "finalizado": False,
+    }
     dialogo.title("Cierre administrativo")
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
@@ -1218,21 +1276,8 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
     botones.pack(fill=tk.X, pady=(18, 0))
     intentos_incorrectos = {"cantidad": 0}
 
-    def cerrar(cancelado=True, restaurar=True):
-        global dialogo_admin_abierto
-        try:
-            dialogo.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            dialogo.destroy()
-        except tk.TclError:
-            pass
-        dialogo_admin_abierto = False
-        if cancelado:
-            registrar_evento_tecnico("ADMIN_DIALOGO_CANCELADO")
-        if restaurar:
-            _restaurar_grab_administrativo(grab_anterior, foco_anterior)
+    def cerrar(motivo="CANCELADO", restaurar=True):
+        finalizar_dialogo_administrativo(motivo, restaurar, dialogo)
 
     def cerrar_sistema():
         global contexto_contingencia_proximidad
@@ -1240,7 +1285,7 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
         global ventana_entrega_activa
 
         registrar_evento_tecnico("ADMIN_SALIDA_AUTORIZADA")
-        cerrar(cancelado=False, restaurar=False)
+        cerrar("AUTORIZADO", restaurar=False)
         contexto_contingencia_proximidad = None
         confirmacion_contingencia_abierta = False
         ventana_entrega_activa = None
@@ -1259,7 +1304,7 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
 
         intentos_incorrectos["cantidad"] += 1
         if intentos_incorrectos["cantidad"] >= 3:
-            cerrar()
+            cerrar("PASSWORD_INCORRECTA")
             return
 
         restantes = 3 - intentos_incorrectos["cantidad"]
@@ -1286,9 +1331,14 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
         **estilo_boton("error")
     ).pack(side=tk.RIGHT)
 
-    dialogo.protocol("WM_DELETE_WINDOW", cerrar)
+    def al_destruir(event):
+        if event.widget == dialogo:
+            finalizar_dialogo_administrativo("DESTROY_PROGRAMATICO", dialogo=dialogo)
+
+    dialogo.protocol("WM_DELETE_WINDOW", lambda: cerrar("CANCELADO"))
     dialogo.bind("<Return>", lambda _evento: autenticar())
-    dialogo.bind("<Escape>", lambda _evento: cerrar())
+    dialogo.bind("<Escape>", lambda _evento: cerrar("CANCELADO"))
+    dialogo.bind("<Destroy>", al_destruir, add="+")
     vincular_dispatcher_administrativo(dialogo)
     _centrar_dialogo(dialogo, parent, ancho_minimo=460, alto_minimo=285)
     dialogo.grab_set()
@@ -2545,6 +2595,10 @@ def procesar_timeout_inactividad():
     contexto_contingencia_proximidad = None
     confirmacion_contingencia_abierta = False
     procesando_sesion = False
+
+    # El admin puede ser hijo de uno de estos modales. Límpialo antes de que
+    # Tk lo destruya indirectamente junto con su padre.
+    finalizar_dialogo_administrativo("TIMEOUT", restaurar=False)
 
     for dialogo in list(ventanas_flujo_alumno):
         try:
