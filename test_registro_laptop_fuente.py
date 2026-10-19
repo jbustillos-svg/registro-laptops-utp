@@ -159,21 +159,73 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         detectar = espacio["es_atajo_administrativo"]
         for tecla in ("u", "U"):
             self.assertTrue(detectar(SimpleNamespace(keysym=tecla, state=0x0004 | 0x0008)))
+            self.assertTrue(detectar(SimpleNamespace(keysym=tecla, state=0x0004 | 0x20000)))
         self.assertFalse(detectar(SimpleNamespace(keysym="u", state=0x0004)))
         self.assertFalse(detectar(SimpleNamespace(keysym="u", state=0x0008)))
 
-    def test_atajo_usa_un_solo_binding_global_y_respeta_contexto_proximidad(self):
+    def test_atajo_conserva_binding_del_root_y_agrega_binding_directo_al_toplevel(self):
         self.assertIn('ventana.bind_all("<KeyPress>", manejar_tecla_global)', self.fuente)
         self.assertNotIn('ventana.bind_all("<Control-Alt-u>"', self.fuente)
-        manejador = self.fuente.split("def manejar_atajo_administrativo(event=None):", 1)[1].split(
+        vinculacion = self.fuente.split("def vincular_atajo_proximidad(dialogo):", 1)[1].split(
+            "def manejar_tecla_global", 1
+        )[0]
+        self.assertIn('dialogo.bind("<KeyPress>", manejar_tecla_proximidad, add="+")', vinculacion)
+        self.assertIn('"<Control-Alt-u>"', vinculacion)
+        self.assertIn('"<Control-Alt-U>"', vinculacion)
+        self.assertIn("dialogo.focus_force()", vinculacion)
+        self.assertIn("vincular_atajo_proximidad(_dialogo)", self.fuente)
+        self.assertIn("dialogo.grab_set()", self.fuente)
+
+    def test_atajo_central_instrumenta_y_respeta_estados_de_proximidad(self):
+        manejador = self.fuente.split(
+            "def manejar_atajo_admin(event=None, combinacion_confirmada=False):", 1
+        )[1].split(
             "def crear_modal_verificacion_ubicacion", 1
         )[0]
+        self.assertIn("ATAJO_CTRL_ALT_U_DETECTADO", manejador)
+        self.assertIn("ATAJO_CTRL_ALT_U_RECHAZADO", manejador)
+        self.assertIn("ESTADO_PROXIMIDAD_ACTUAL", manejador)
+        self.assertIn("CONTINGENCIA_ABIERTA_FLAG", manejador)
         self.assertIn("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD", manejador)
         self.assertIn("CONTINGENCIA_PROXIMIDAD_ABIERTA", manejador)
         self.assertIn("ATAJO_ADMIN_DETECTADO contexto=LOGIN", manejador)
-        self.assertIn("ESTADO_NO_DETECTADO, ESTADO_ERROR", manejador)
+        self.assertIn("estado not in (ESTADO_NO_DETECTADO, ESTADO_ERROR)", manejador)
+        self.assertIn("motivo=estado_no_autorizado", manejador)
         self.assertIn("if confirmacion_contingencia_abierta:", manejador)
+        self.assertIn("motivo=confirmacion_ya_abierta", manejador)
+        self.assertIn("finally:", manejador)
+        self.assertIn("confirmacion_contingencia_abierta = False", manejador)
         self.assertIn('return "break"', manejador)
+
+    def test_diagnostico_de_tecla_no_registra_texto_escrito(self):
+        diagnostico = self.fuente.split("def registrar_tecla_proximidad(event):", 1)[1].split(
+            "def manejar_tecla_proximidad", 1
+        )[0]
+        for campo in ("TECLA_PROXIMIDAD", "keysym=", "keycode=", "state=", "widget="):
+            self.assertIn(campo, diagnostico)
+        self.assertNotIn("event.char", diagnostico)
+        self.assertIn('widget.winfo_class()', diagnostico)
+
+    def test_estado_lejos_se_instrumenta_pero_no_autoriza_contingencia(self):
+        self.assertEqual(self.fuente.count("iniciar_contexto_contingencia("), 3)
+        self.assertEqual(
+            self.fuente.count("al_crear=registrar_dialogo_fallo_contingencia"),
+            2,
+        )
+        self.assertIn(
+            "estado not in (ESTADO_NO_DETECTADO, ESTADO_ERROR)",
+            self.fuente,
+        )
+        self.assertIn('"Ubicación no validada"', self.fuente)
+
+    def test_una_pulsacion_no_abre_dos_confirmaciones(self):
+        directo = self.fuente.split("def vincular_atajo_proximidad(dialogo):", 1)[1].split(
+            "def manejar_tecla_global", 1
+        )[0]
+        self.assertIn("manejar_atajo_admin", directo)
+        self.assertIn('return "break"', self.fuente.split(
+            "def manejar_atajo_admin(event=None, combinacion_confirmada=False):", 1
+        )[1].split("def manejar_atajo_administrativo", 1)[0])
 
 
 if __name__ == "__main__":

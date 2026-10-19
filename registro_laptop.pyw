@@ -1255,6 +1255,17 @@ def iniciar_contexto_contingencia(estado, tipo_operacion, matricula, parent):
 def registrar_dialogo_fallo_contingencia(_dialogo, cerrar_dialogo):
     if contexto_contingencia_proximidad is not None:
         contexto_contingencia_proximidad["cerrar_dialogo_fallo"] = cerrar_dialogo
+        contexto_contingencia_proximidad["dialogo"] = _dialogo
+        contexto_contingencia_proximidad["ultima_tecla"] = None
+        registrar_evento_tecnico(
+            "ESTADO_PROXIMIDAD_ACTUAL="
+            f"{contexto_contingencia_proximidad['estado']}"
+        )
+        registrar_evento_tecnico(
+            "CONTINGENCIA_ABIERTA_FLAG="
+            f"{confirmacion_contingencia_abierta}"
+        )
+        vincular_atajo_proximidad(_dialogo)
 
 
 def finalizar_contexto_contingencia():
@@ -1270,29 +1281,106 @@ def finalizar_contexto_contingencia():
 def es_atajo_administrativo(event):
     """Reconoce Ctrl+Alt+U sin depender de la variante de keysym de Windows."""
     try:
+        estado = int(getattr(event, "state", 0))
         return (
             str(getattr(event, "keysym", "")).lower() == "u"
-            and bool(getattr(event, "state", 0) & 0x0004)  # Control
-            and bool(getattr(event, "state", 0) & 0x0008)  # Alt
+            and bool(estado & 0x0004)  # Control
+            # Tk usa Mod1 (0x0008), pero Windows también reporta Alt como 0x20000.
+            and bool(estado & (0x0008 | 0x20000))
         )
     except (TypeError, ValueError):
         return False
 
 
-def manejar_tecla_global(event):
-    """Único binding global: funciona también dentro de Toplevels con grab_set."""
-    registrar_actividad_usuario(event)
+def registrar_tecla_proximidad(event):
+    """Registra metadatos de teclado, nunca el texto introducido por el usuario."""
+    contexto = contexto_contingencia_proximidad
+    if not contexto:
+        return
+
+    huella = (
+        getattr(event, "serial", None),
+        getattr(event, "time", None),
+        getattr(event, "keycode", None),
+        getattr(event, "state", None),
+        getattr(event, "keysym", None),
+    )
+    if contexto.get("ultima_tecla") == huella:
+        return
+    contexto["ultima_tecla"] = huella
+
+    widget = getattr(event, "widget", None)
+    try:
+        widget_seguro = widget.winfo_class() if widget else "NINGUNO"
+    except tk.TclError:
+        widget_seguro = "DESTRUIDO"
+    registrar_evento_tecnico(
+        "TECLA_PROXIMIDAD "
+        f"keysym={getattr(event, 'keysym', '')} "
+        f"keycode={getattr(event, 'keycode', '')} "
+        f"state={getattr(event, 'state', '')} "
+        f"widget={widget_seguro}"
+    )
+
+
+def manejar_tecla_proximidad(event):
+    registrar_tecla_proximidad(event)
     if es_atajo_administrativo(event):
-        return manejar_atajo_administrativo(event)
+        return manejar_atajo_admin(event)
     return None
 
 
-def manejar_atajo_administrativo(event=None):
+def vincular_atajo_proximidad(dialogo):
+    """El Toplevel con grab recibe el atajo aunque el binding del root no lo vea."""
+    dialogo.bind("<KeyPress>", manejar_tecla_proximidad, add="+")
+    dialogo.bind(
+        "<Control-Alt-u>",
+        lambda event: manejar_atajo_admin(event, combinacion_confirmada=True),
+        add="+",
+    )
+    dialogo.bind(
+        "<Control-Alt-U>",
+        lambda event: manejar_atajo_admin(event, combinacion_confirmada=True),
+        add="+",
+    )
+    dialogo.focus_force()
+
+
+def manejar_tecla_global(event):
+    """Binding del root y respaldo para ventanas que no son de proximidad."""
+    registrar_actividad_usuario(event)
+    registrar_tecla_proximidad(event)
+    if es_atajo_administrativo(event):
+        return manejar_atajo_admin(event)
+    return None
+
+
+def manejar_atajo_admin(event=None, combinacion_confirmada=False):
     global confirmacion_contingencia_abierta
 
+    if event is not None:
+        registrar_tecla_proximidad(event)
+    if not combinacion_confirmada and event is not None and not es_atajo_administrativo(event):
+        return None
+
+    registrar_evento_tecnico("ATAJO_CTRL_ALT_U_DETECTADO")
     contexto = contexto_contingencia_proximidad
-    if contexto and contexto["estado"] in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
+    if contexto:
+        estado = contexto.get("estado")
+        registrar_evento_tecnico(f"ESTADO_PROXIMIDAD_ACTUAL={estado}")
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_ABIERTA_FLAG={confirmacion_contingencia_abierta}"
+        )
+        if estado not in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
+            registrar_evento_tecnico(
+                "ATAJO_CTRL_ALT_U_RECHAZADO "
+                f"motivo=estado_no_autorizado estado={estado}"
+            )
+            return "break"
         if confirmacion_contingencia_abierta:
+            registrar_evento_tecnico(
+                "ATAJO_CTRL_ALT_U_RECHAZADO motivo=confirmacion_ya_abierta"
+            )
             return "break"
 
         confirmacion_contingencia_abierta = True
@@ -1339,6 +1427,11 @@ def manejar_atajo_administrativo(event=None):
         pass
 
     return "break"
+
+
+def manejar_atajo_administrativo(event=None):
+    """Compatibilidad para llamadas existentes; la lógica vive en un único manejador."""
+    return manejar_atajo_admin(event)
 
 
 def crear_modal_verificacion_ubicacion(
@@ -2963,26 +3056,23 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     ESTADO_NO_DETECTADO,
                     ESTADO_ERROR
                 )
-                if permite_contingencia:
-                    iniciar_contexto_contingencia(
-                        estado_proximidad,
-                        "DEVOLUCION",
-                        matricula,
-                        ventana
-                    )
-                else:
+                iniciar_contexto_contingencia(
+                    estado_proximidad,
+                    "DEVOLUCION",
+                    matricula,
+                    ventana
+                )
+                if not permite_contingencia:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
 
                 mostrar_fallo_proximidad(
                     estado_proximidad,
                     parent=ventana,
-                    al_crear=(
-                        registrar_dialogo_fallo_contingencia
-                        if permite_contingencia else None
-                    )
+                    al_crear=registrar_dialogo_fallo_contingencia
                 )
 
-                if permite_contingencia and finalizar_contexto_contingencia():
+                contingencia_autorizada = finalizar_contexto_contingencia()
+                if permite_contingencia and contingencia_autorizada:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                     modal_progreso = crear_modal_verificacion_ubicacion(
                         ventana,
@@ -4061,14 +4151,13 @@ def iniciar_sesion():
                 ESTADO_NO_DETECTADO,
                 ESTADO_ERROR
             )
-            if permite_contingencia:
-                iniciar_contexto_contingencia(
-                    estado_proximidad,
-                    "PRESTAMO",
-                    matricula,
-                    ventana
-                )
-            else:
+            iniciar_contexto_contingencia(
+                estado_proximidad,
+                "PRESTAMO",
+                matricula,
+                ventana
+            )
+            if not permite_contingencia:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
 
             try:
@@ -4076,17 +4165,15 @@ def iniciar_sesion():
                 mostrar_fallo_proximidad(
                     estado_proximidad,
                     parent=ventana,
-                    al_crear=(
-                        registrar_dialogo_fallo_contingencia
-                        if permite_contingencia else None
-                    )
+                    al_crear=registrar_dialogo_fallo_contingencia
                 )
             except Exception:
                 traceback.print_exc()
             finally:
                 cancelar_timeout_inactividad()
 
-            if permite_contingencia and finalizar_contexto_contingencia():
+            contingencia_autorizada = finalizar_contexto_contingencia()
+            if permite_contingencia and contingencia_autorizada:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                 procesar_proximidad(True, None)
                 return
