@@ -343,6 +343,7 @@ class ContingenciaLocal:
     def _datos_fila_registro(sesion):
         return {
             "id_sesion": sesion["id_sesion"],
+            "prestamo_evento_id": sesion["prestamo_evento_id"] or "",
             "matricula": sesion["matricula"],
             "nombre": sesion["nombre"],
             "fecha": sesion["fecha_entrada"],

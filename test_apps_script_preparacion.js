@@ -7,6 +7,7 @@ const fuente = fs.readFileSync('apps_script_sincronizacion.gs', 'utf8');
 
 function ejecutarPreparacion(urlDetectada, filasIniciales) {
   const escrituras = [];
+  const formatosRegistros = [];
   const hoja = {
     getDataRange: () => ({getValues: () => filasIniciales}),
     getRange: () => ({setValues: (valores) => escrituras.push(valores)}),
@@ -14,17 +15,30 @@ function ejecutarPreparacion(urlDetectada, filasIniciales) {
     hideSheet: () => {},
     protect: () => ({setWarningOnly: () => {}}),
   };
+  const registros = {
+    getLastRow: () => 4,
+    getRange: (fila, columna, alto, ancho) => ({
+      setHorizontalAlignment: (alineacion) => formatosRegistros.push(
+        {fila, columna, alto, ancho, alineacion}
+      ),
+      setNumberFormat: (formato) => formatosRegistros.push(
+        {fila, columna, alto, ancho, formato}
+      ),
+    }),
+  };
   const contexto = {
     PropertiesService: {getScriptProperties: () => ({getProperty: () => 'clave-de-prueba'})},
     ScriptApp: {getService: () => ({getUrl: () => urlDetectada})},
-    SpreadsheetApp: {getActiveSpreadsheet: () => ({})},
+    SpreadsheetApp: {getActiveSpreadsheet: () => ({
+      getSheetByName: (nombre) => nombre === 'Registros' ? registros : null,
+    })},
     console,
   };
   vm.createContext(contexto);
   vm.runInContext(fuente, contexto);
   contexto.asegurarHojaEventos_ = () => {};
   contexto.asegurarHojaConfiguracion_ = () => hoja;
-  return {ejecutar: () => contexto.prepararInfraestructuraContingencia(), escrituras};
+  return {ejecutar: () => contexto.prepararInfraestructuraContingencia(), escrituras, formatosRegistros};
 }
 
 const existenteExec = 'https://script.google.com/a/utparral.edu.mx/macros/s/existente_123/exec';
@@ -34,6 +48,12 @@ let caso = ejecutarPreparacion(
 );
 caso.ejecutar();
 assert.equal(caso.escrituras[1][0][1], existenteExec, 'debe conservar /exec existente');
+assert.ok(caso.formatosRegistros.some((formato) =>
+  formato.columna === 1 && formato.ancho === 7 && formato.alineacion === 'left'
+), 'A:G debe alinearse a la izquierda');
+assert.ok(caso.formatosRegistros.some((formato) =>
+  formato.columna === 1 && formato.ancho === 1 && formato.formato === '@'
+), 'A debe tener formato texto');
 
 caso = ejecutarPreparacion(
   'https://script.google.com/macros/s/detectada/dev',

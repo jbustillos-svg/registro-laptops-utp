@@ -45,6 +45,19 @@ class PruebasFuenteAppsScript(unittest.TestCase):
         ):
             self.assertIn(simbolo, self.fuente)
 
+    def test_matricula_es_texto_y_devolucion_verifica_horas_normalizadas(self):
+        for simbolo in (
+            "setNumberFormat('@')",
+            "setHorizontalAlignment('left')",
+            "matriculaEquivalentePorCeroInicial_",
+            "buscarRegistroPorSesion_",
+            "horaSalidaCoincide_",
+            "MATRICULA_CERO_INICIAL_RECUPERADA",
+        ):
+            self.assertIn(simbolo, self.fuente)
+        self.assertNotIn("parseInt(evento.matricula", self.fuente)
+        self.assertNotIn("Number(evento.matricula", self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()

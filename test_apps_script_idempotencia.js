@@ -14,6 +14,8 @@ class HojaFalsa {
   constructor(filas, opciones = {}) {
     this.filas = filas.map((fila) => fila.slice());
     this.fallosLecturaTrasEscritura = opciones.fallosLecturaTrasEscritura || 0;
+    this.alineaciones = [];
+    this.formatosNumero = [];
   }
 
   getDataRange() {
@@ -43,6 +45,12 @@ class HojaFalsa {
       })),
       getValue: () => this.filas[fila - 1]?.[columna - 1] ?? '',
       setValue: (valor) => { this.filas[fila - 1][columna - 1] = valor; },
+      setHorizontalAlignment: (alineacion) => this.alineaciones.push(
+        {fila, columna, alto, ancho, alineacion}
+      ),
+      setNumberFormat: (formato) => this.formatosNumero.push(
+        {fila, columna, alto, ancho, formato}
+      ),
     };
   }
 }
@@ -50,8 +58,15 @@ class HojaFalsa {
 function crearEntorno(registrosFilas = [CABECERA], opciones = {}) {
   const registros = new HojaFalsa(registrosFilas, opciones);
   const alumnos = new HojaFalsa([['MATRICULA', '', '', '', 'NO_ENTREGAS'], ['824118001', '', '', '', 0]]);
+  const eventos = new HojaFalsa([[
+    'ID_EVENTO', 'TIPO', 'MATRICULA', 'LAPTOP_ID', 'FECHA_HORA_EVENTO',
+    'ESTADO', 'FECHA_PREPARACION', 'FECHA_APLICACION',
+    'REFERENCIA_REGISTRO', 'DATOS_CONTROL', 'EQUIPO_ORIGEN'
+  ]]);
   const libro = {
-    getSheetByName: (nombre) => ({Registros: registros, Alumnos: alumnos}[nombre] || null),
+    getSheetByName: (nombre) => ({
+      Registros: registros, Alumnos: alumnos, Eventos_Sincronizacion: eventos
+    }[nombre] || null),
     getId: () => 'libro-falso',
   };
   const logs = [];
@@ -75,7 +90,7 @@ function crearEntorno(registrosFilas = [CABECERA], opciones = {}) {
   };
   vm.createContext(contexto);
   vm.runInContext(fuente, contexto);
-  return {contexto, libro, registros, logs, aplicar: (evento) => contexto.aplicarEvento_(libro, evento)};
+  return {contexto, libro, registros, eventos, logs, aplicar: (evento) => contexto.aplicarEvento_(libro, evento)};
 }
 
 function prestamo(datos = {}) {
@@ -162,5 +177,56 @@ assert.equal(caso.registros.filas[1][6], 'CIERRE_AUTOMATICO_POR_NUEVA_SESION');
 caso = crearEntorno([CABECERA, filaPrestamo()]);
 assert.equal(caso.aplicar({...base, tipo_evento: 'NO_ENTREGA'}), 'Registros!2');
 assert.equal(caso.registros.filas[1][6], 'NO_ENTREGA_CONTADA');
+
+// 13: la matrÃ­cula es identificador textual; conserva ceros iniciales y no
+// rellena identificadores especiales.
+caso = crearEntorno();
+const diana = {
+  id_evento: 'a4916ad1-d4d3-4289-add7-0dc82e2f16e8', tipo_evento: 'PRESTAMO',
+  matricula: '0824118047', nombre: 'Diana Chaparro Leyva',
+  fecha_evento: '2026-10-19', hora_evento: '14:05:45', laptop_id: 'AulaMovil24-B',
+  datos: {fecha: '2026-10-19', hora_ingreso: '14:05:45', nombre: 'Diana Chaparro Leyva', id_sesion: 'sesion-diana'},
+};
+assert.equal(caso.aplicar(diana), 'Registros!2');
+assert.equal(caso.registros.filas[1][0], '0824118047');
+assert.ok(caso.registros.formatosNumero.some((formato) => formato.columna === 1 && formato.formato === '@'));
+assert.ok(caso.registros.alineaciones.some((alineacion) =>
+  alineacion.columna === 1 && alineacion.ancho === 7 && alineacion.alineacion === 'left'
+));
+const especial = {...diana, id_evento: 'b4916ad1-d4d3-4289-add7-0dc82e2f16e8', matricula: 'DOC-17',
+  fecha_evento: '2026-10-20', hora_evento: '09:00:00',
+  datos: {...diana.datos, fecha: '2026-10-20', hora_ingreso: '09:00:00'}};
+assert.equal(caso.aplicar(especial), 'Registros!3');
+assert.equal(caso.registros.filas[2][0], 'DOC-17');
+
+// 14: una DEVOLUCION encuentra el prÃ©stamo legado al que Sheets quitÃ³ el cero,
+// usando primero la referencia/id_sesion y sin tocar otro registro.
+caso = crearEntorno([
+  CABECERA,
+  [824118047, 'Diana Chaparro Leyva', new Date('2026-10-19T00:00:00Z'), 50745 / 86400, '', 'AulaMovil24-B', 'S/N'],
+  ['OTRA', 'Otra persona', '2026-10-19', '14:05:45', '', 'Otra-Laptop', 'S/N'],
+]);
+caso.eventos.filas.push([
+  'prestamo-diana', 'PRESTAMO', '0824118047', 'AulaMovil24-B', '2026-10-19 14:05:45',
+  'APLICADO', '', '', 'Registros!2', JSON.stringify({datos: {id_sesion: 'sesion-diana'}}), ''
+]);
+const devolucionDiana = {
+  ...diana, id_evento: 'c4916ad1-d4d3-4289-add7-0dc82e2f16e8', tipo_evento: 'DEVOLUCION',
+  hora_evento: '16:10:11', datos: {...diana.datos, hora_salida: '16:10:11', prestamo_evento_id: 'prestamo-diana'},
+};
+assert.equal(caso.aplicar(devolucionDiana), 'Registros!2');
+assert.equal(caso.registros.filas[1][4], '16:10:11');
+assert.equal(caso.registros.filas[2][4], '');
+assert.equal(caso.aplicar(devolucionDiana), 'Registros!2');
+assert.equal(caso.registros.filas[1][4], '16:10:11');
+
+// 15: si la primera escritura ya se aplicÃ³ como serial/Date/texto, el reintento
+// reconoce la Hora_Salida original y no la sustituye por la hora de sincronizaciÃ³n.
+caso.registros.filas[1][4] = (16 * 3600 + 10 * 60 + 11) / 86400;
+assert.equal(caso.aplicar(devolucionDiana), 'Registros!2');
+assert.equal(caso.registros.filas[1][4], (16 * 3600 + 10 * 60 + 11) / 86400);
+caso.registros.filas[1][4] = new Date('1970-01-01T16:10:11Z');
+assert.equal(caso.aplicar(devolucionDiana), 'Registros!2');
+assert.equal(caso.registros.filas[1][4].toISOString(), '1970-01-01T16:10:11.000Z');
 
 console.log('Pruebas de idempotencia Apps Script: OK');

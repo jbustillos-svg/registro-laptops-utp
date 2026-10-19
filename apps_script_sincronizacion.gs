@@ -73,6 +73,7 @@ function prepararInfraestructuraContingencia() {
 
   const libro = SpreadsheetApp.getActiveSpreadsheet();
   asegurarHojaEventos_(libro);
+  asegurarFormatoRegistros_(libro.getSheetByName(HOJA_REGISTROS));
   const configuracion = asegurarHojaConfiguracion_(libro);
   const urlExistente = valorConfiguracion_(configuracion, 'URL_APPS_SCRIPT');
   const url = esUrlWebAppProduccion_(urlExistente)
@@ -155,6 +156,15 @@ function asegurarHojaConfiguracion_(libro) {
   return hoja;
 }
 
+function asegurarFormatoRegistros_(hoja) {
+  // A:G se presenta a la izquierda. Sólo A se fuerza como texto: fecha y horas
+  // conservan sus tipos y formatos existentes.
+  if (!hoja) return;
+  const filas = Math.max(hoja.getLastRow(), 1);
+  hoja.getRange(1, 1, filas, 7).setHorizontalAlignment('left');
+  hoja.getRange(1, 1, filas, 1).setNumberFormat('@');
+}
+
 function buscarEvento_(hoja, idEvento) {
   const ultima = hoja.getLastRow();
   if (ultima < 2) return null;
@@ -176,6 +186,9 @@ function registrarPreparando_(hoja, evento) {
     nombre: String(evento.nombre || ''), datos: evento.datos || {},
     fecha_creacion: String(evento.fecha_creacion || '')
   });
+  // La bitácora también conserva el identificador literal para que un reintento
+  // reconstruya exactamente el mismo evento, aun si Registros aún no existe.
+  hoja.getRange(hoja.getLastRow() + 1, 3).setNumberFormat('@');
   hoja.appendRow([
     evento.id_evento, evento.tipo_evento, evento.matricula, evento.laptop_id,
     fechaHoraEvento_(evento), 'PREPARANDO', fecha, '', '', datosControl,
@@ -189,7 +202,8 @@ function eventoGuardado_(encontrado, recibido) {
   try { control = JSON.parse(encontrado.valores[9] || '{}'); } catch (ignored) {}
   return {
     id_evento: String(encontrado.valores[0]), tipo_evento: String(encontrado.valores[1]),
-    matricula: String(encontrado.valores[2]), laptop_id: String(encontrado.valores[3]),
+    matricula: String(control.datos.matricula || encontrado.valores[2]),
+    laptop_id: String(control.datos.laptop_id || encontrado.valores[3]),
     fecha_evento: String(encontrado.valores[4]).substring(0, 10),
     hora_evento: String(encontrado.valores[4]).substring(11),
     nombre: String(control.nombre || recibido.nombre || ''),
@@ -215,6 +229,7 @@ function aplicarEvento_(libro, evento) {
   const registros = libro.getSheetByName(HOJA_REGISTROS);
   const alumnos = libro.getSheetByName(HOJA_ALUMNOS);
   if (!registros || !alumnos) throw new Error('HOJA_OPERATIVA_NO_ENCONTRADA');
+  asegurarFormatoRegistros_(registros);
   const datos = evento.datos || {};
   if (evento.tipo_evento === 'PRESTAMO') {
     // PREPARANDO y ERROR son estados ambiguos: antes de insertar se reconcilian
@@ -236,11 +251,17 @@ function aplicarEvento_(libro, evento) {
     const fila = verificarPrestamo_(registros, coincidencias[0].fila, evento, datos);
     return 'Registros!' + fila;
   }
-  const fila = buscarRegistro_(registros, evento, datos);
+  const fila = buscarRegistro_(libro, registros, evento, datos);
   if (!fila) throw new Error('DEPENDENCIA_PRESTAMO_NO_ENCONTRADA');
   if (evento.tipo_evento === 'DEVOLUCION') {
-    registros.getRange(fila, 5).setValue(String(datos.hora_salida || evento.hora_evento));
-    if (String(registros.getRange(fila, 5).getValue()) !== String(datos.hora_salida || evento.hora_evento)) {
+    const horaSalidaOriginal = String(datos.hora_salida || evento.hora_evento);
+    const celdaSalida = registros.getRange(fila, 5);
+    // Si una escritura anterior alcanzó Sheets pero falló la lectura/verificación,
+    // se reconoce como aplicada sin reemplazar la hora original de la entrega.
+    if (!horaSalidaCoincide_(celdaSalida.getValue(), horaSalidaOriginal)) {
+      celdaSalida.setValue(horaSalidaOriginal);
+    }
+    if (!horaSalidaCoincide_(celdaSalida.getValue(), horaSalidaOriginal)) {
       throw new Error('VERIFICACION_DEVOLUCION_FALLIDA');
     }
   } else if (evento.tipo_evento === 'NO_ENTREGA') {
@@ -256,9 +277,33 @@ function aplicarEvento_(libro, evento) {
   return 'Registros!' + fila;
 }
 
-function buscarRegistro_(hoja, evento, datos) {
+function buscarRegistro_(libro, hoja, evento, datos) {
   const coincidencias = buscarRegistrosPrestamoCompatibles_(hoja, evento, datos);
-  return coincidencias.length ? coincidencias[0].fila : null;
+  if (coincidencias.length) return coincidencias[0].fila;
+
+  // Las sesiones v1.4.1 llevan id_sesion. Cuando existe la referencia de su
+  // PRESTAMO, se usa sólo si sigue señalando una fila compatible.
+  const filaPorSesion = buscarRegistroPorSesion_(libro, hoja, evento, datos);
+  if (filaPorSesion) return filaPorSesion;
+
+  // Recupera filas antiguas en las que Sheets quitó exclusivamente ceros
+  // iniciales de una matrícula numérica. Se exige el resto de la identidad del
+  // préstamo y una única coincidencia para no tocar otro préstamo.
+  const recuperadas = buscarRegistrosPrestamoCompatibles_(hoja, evento, datos, true);
+  if (recuperadas.length === 1) {
+    Logger.log(
+      'MATRICULA_CERO_INICIAL_RECUPERADA id=' + String(evento.id_evento || '') +
+      ' referencia=Registros!' + recuperadas[0].fila
+    );
+    return recuperadas[0].fila;
+  }
+  if (recuperadas.length > 1) {
+    Logger.log(
+      'DEPENDENCIA_PRESTAMO_AMBIGUA id=' + String(evento.id_evento || '') +
+      ' coincidencias=' + recuperadas.length
+    );
+  }
+  return null;
 }
 
 function identidadPrestamo_(evento, datos) {
@@ -271,21 +316,26 @@ function identidadPrestamo_(evento, datos) {
   };
 }
 
-function buscarRegistrosPrestamoCompatibles_(hoja, evento, datos) {
+function buscarRegistrosPrestamoCompatibles_(hoja, evento, datos, tolerarCeroInicial) {
   const identidad = identidadPrestamo_(evento, datos);
   const filas = hoja.getDataRange().getValues();
   const coincidencias = [];
   for (let indice = 1; indice < filas.length; indice++) {
     const fila = filas[indice];
-    if (registroPrestamoCompatible_(fila, identidad)) {
+    if (registroPrestamoCompatible_(fila, identidad, tolerarCeroInicial)) {
       coincidencias.push({fila: indice + 1, valores: fila});
     }
   }
   return coincidencias;
 }
 
-function registroPrestamoCompatible_(registro, identidad) {
-  return normalizarTexto_(registro[0]) === identidad.matricula &&
+function registroPrestamoCompatible_(registro, identidad, tolerarCeroInicial) {
+  const matriculaRegistro = normalizarTexto_(registro[0]);
+  const matriculaCompatible = matriculaRegistro === identidad.matricula ||
+    (tolerarCeroInicial && matriculaEquivalentePorCeroInicial_(
+      matriculaRegistro, identidad.matricula
+    ));
+  return matriculaCompatible &&
     normalizarTexto_(registro[5]) === identidad.laptopId &&
     normalizarFecha_(registro[2]) === identidad.fecha &&
     normalizarHora_(registro[3]) === identidad.hora &&
@@ -302,6 +352,8 @@ function insertarPrestamoCronologico_(hoja, evento, datos) {
     if (clave > nuevaClave) { destino = indice + 1; break; }
   }
   if (destino <= hoja.getLastRow()) hoja.insertRowBefore(destino);
+  hoja.getRange(destino, 1, 1, 7).setHorizontalAlignment('left');
+  hoja.getRange(destino, 1).setNumberFormat('@');
   hoja.getRange(destino, 1, 1, 7).setValues([[
     identidad.matricula, identidad.nombre, identidad.fecha, identidad.hora, '',
     identidad.laptopId, 'S/N'
@@ -326,6 +378,45 @@ function verificarPrestamo_(hoja, fila, evento, datos) {
 
 function normalizarTexto_(valor) {
   return String(valor === null || valor === undefined ? '' : valor).trim();
+}
+
+function matriculaEquivalentePorCeroInicial_(izquierda, derecha) {
+  const valorIzquierdo = normalizarTexto_(izquierda);
+  const valorDerecho = normalizarTexto_(derecha);
+  if (!/^\d+$/.test(valorIzquierdo) || !/^\d+$/.test(valorDerecho)) return false;
+  if (valorIzquierdo.charAt(0) !== '0' && valorDerecho.charAt(0) !== '0') return false;
+  return valorIzquierdo.replace(/^0+(?=\d)/, '') ===
+    valorDerecho.replace(/^0+(?=\d)/, '');
+}
+
+function horaSalidaCoincide_(valorLeido, horaOriginal) {
+  return normalizarHora_(valorLeido) === normalizarHora_(horaOriginal);
+}
+
+function buscarRegistroPorSesion_(libro, registros, evento, datos) {
+  const idSesion = normalizarTexto_(datos.id_sesion);
+  const idPrestamo = normalizarTexto_(datos.prestamo_evento_id);
+  if (!idSesion && !idPrestamo) return null;
+  const hojaEventos = libro.getSheetByName(HOJA_EVENTOS);
+  if (!hojaEventos || hojaEventos.getLastRow() < 2) return null;
+  const filas = hojaEventos.getDataRange().getValues();
+  const identidad = identidadPrestamo_(evento, datos);
+  for (let indice = 1; indice < filas.length; indice++) {
+    const filaEvento = filas[indice];
+    if (String(filaEvento[1]) !== 'PRESTAMO') continue;
+    if (idPrestamo && normalizarTexto_(filaEvento[0]) !== idPrestamo) continue;
+    let control = {};
+    try { control = JSON.parse(filaEvento[9] || '{}'); } catch (ignored) {}
+    if (idSesion && normalizarTexto_(control.datos && control.datos.id_sesion) !== idSesion) continue;
+    const referencia = String(filaEvento[8] || '');
+    const coincidencia = referencia.match(/^Registros!(\d+)$/);
+    if (!coincidencia) continue;
+    const filaRegistro = Number(coincidencia[1]);
+    if (filaRegistro < 2 || filaRegistro > registros.getLastRow()) continue;
+    const registro = registros.getRange(filaRegistro, 1, 1, 7).getValues()[0];
+    if (registroPrestamoCompatible_(registro, identidad, true)) return filaRegistro;
+  }
+  return null;
 }
 
 function esFecha_(valor) {
