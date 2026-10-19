@@ -31,8 +31,6 @@ from contingencia_local import (
 )
 from sincronizador_contingencia import (
     SincronizadorContingencia,
-    diagnostico_error_coordinador,
-    enviar_evento_coordinador,
 )
 from sincronizacion_config import (
     actualizar_configuracion_desde_hoja,
@@ -193,27 +191,16 @@ def _fecha_hora_local():
 
 
 def enviar_evento_local_inmediato(id_evento):
-    """Intenta el mismo UUID ya persistido; un fallo conserva la cola local."""
+    """Despierta la cola persistente sin esperar un POST desde el flujo de UI."""
     if almacen_contingencia is None:
         return False
     evento = almacen_contingencia.obtener_evento(id_evento)
-    configuracion = cargar_configuracion_local(DIRECTORIO_APP)
-    if not evento or not configuracion:
+    if not evento:
         return False
-    try:
-        referencia = enviar_evento_coordinador(evento, configuracion)
-        almacen_contingencia.marcar_sincronizado(id_evento, referencia)
-        registrar_evento_tecnico(
-            f"COORDINADOR_EVENTO_OK id={id_evento} tipo={evento['tipo_evento']}"
-        )
-        return True
-    except Exception as error:
-        almacen_contingencia.incrementar_intentos(id_evento, type(error).__name__)
-        registrar_evento_tecnico(
-            f"COORDINADOR_EVENTO_PENDIENTE id={id_evento} tipo={evento['tipo_evento']} "
-            f"{diagnostico_error_coordinador(error)}"
-        )
-        return False
+    solicitar_sincronizacion_inmediata(evento["tipo_evento"])
+    # La solicitud puede omitirse porque un worker ya procesa la misma cola.
+    # El evento sigue durable y pendiente hasta que el sincronizador lo confirme.
+    return True
 
 
 def crear_y_enviar_evento_critico(tipo, matricula, nombre, fecha, hora, laptop_id,
@@ -234,12 +221,15 @@ def registrar_prestamo_contingencia(matricula, nombre):
         return False
     try:
         fecha, hora = _fecha_hora_local()
-        almacen_contingencia.registrar_prestamo_offline(
+        sesion = almacen_contingencia.registrar_prestamo_offline(
             matricula, nombre, socket.gethostname(), fecha, hora
         )
         registrar_evento_tecnico(
             f"CONTINGENCIA_PRESTAMO_GUARDADO matricula={matricula} fecha={fecha} hora={hora}"
         )
+        id_evento = sesion.get("prestamo_evento_id")
+        if id_evento:
+            enviar_evento_local_inmediato(id_evento)
         return True
     except Exception as error:
         registrar_evento_tecnico(
@@ -321,6 +311,9 @@ def registrar_devolucion_contingencia(matricula):
         registrar_evento_tecnico(
             f"CONTINGENCIA_DEVOLUCION_GUARDADA matricula={matricula} fecha={fecha} hora={hora}"
         )
+        id_evento = sesion.get("devolucion_evento_id")
+        if id_evento:
+            enviar_evento_local_inmediato(id_evento)
         return True
     except Exception as error:
         registrar_evento_tecnico(
@@ -391,22 +384,49 @@ def actualizar_configuracion_sincronizacion():
         configuracion_sincronizacion_lock.release()
 
 
+def _sincronizar_pendientes_con_lock_adquirido():
+    """Procesa la cola; el llamador conserva sincronizacion_lock durante todo el ciclo."""
+    if not almacen_contingencia:
+        return
+    configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+    if not configuracion:
+        return
+    cantidad = SincronizadorContingencia(
+        almacen_contingencia, configuracion, registrar_evento_tecnico
+    ).sincronizar()
+    if cantidad:
+        registrar_evento_tecnico(f"SINCRONIZACION_COMPLETA eventos={cantidad}")
+
+
 def sincronizar_pendientes_en_segundo_plano():
     if not sincronizacion_lock.acquire(blocking=False):
         return
     try:
-        if not almacen_contingencia:
-            return
-        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
-        if not configuracion:
-            return
-        cantidad = SincronizadorContingencia(
-            almacen_contingencia, configuracion, registrar_evento_tecnico
-        ).sincronizar()
-        if cantidad:
-            registrar_evento_tecnico(f"SINCRONIZACION_COMPLETA eventos={cantidad}")
+        _sincronizar_pendientes_con_lock_adquirido()
     finally:
         sincronizacion_lock.release()
+
+
+def solicitar_sincronizacion_inmediata(tipo_evento):
+    """Solicita un único worker daemon para la cola durable ya persistida."""
+    registrar_evento_tecnico(
+        f"SINCRONIZACION_INMEDIATA_SOLICITADA tipo={tipo_evento}"
+    )
+    if not sincronizacion_lock.acquire(blocking=False):
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion"
+        )
+        return False
+
+    def sincronizar():
+        try:
+            registrar_evento_tecnico("SINCRONIZACION_INMEDIATA_INICIADA")
+            _sincronizar_pendientes_con_lock_adquirido()
+        finally:
+            sincronizacion_lock.release()
+
+    threading.Thread(target=sincronizar, daemon=True).start()
+    return True
 
 
 def iniciar_sincronizacion_pendientes():

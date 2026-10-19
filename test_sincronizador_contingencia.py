@@ -112,6 +112,40 @@ class PruebasClienteCoordinador(unittest.TestCase):
         enviar_evento_coordinador(evento, CONFIG, post=post)
         self.assertEqual(enviados, [self.evento, self.evento])
 
+    def test_cada_evento_critico_persistido_permanece_pendiente_si_falla_el_worker(self):
+        """El disparador inmediato puede fallar; SQLite conserva el mismo UUID."""
+        self.almacen.marcar_sincronizado(self.evento)
+        for indice, tipo in enumerate(
+            ("PRESTAMO", "DEVOLUCION", "NO_ENTREGA", "CIERRE_AUTOMATICO"), start=1
+        ):
+            with self.subTest(tipo=tipo):
+                id_evento = f"00000000-0000-4000-8000-{indice:012d}"
+                creado = self.almacen.crear_evento(
+                    "LAP-1", tipo, "A1", "Ana", "2026-10-16", "10:00:00",
+                    "LAP-1", {"id_sesion": "sesion-prueba"}, id_evento=id_evento,
+                )
+
+                cliente = SincronizadorContingencia(
+                    self.almacen, CONFIG, self.logs.append,
+                    post=lambda *_a, **_k: (_ for _ in ()).throw(requests.Timeout()),
+                )
+                self.assertEqual(cliente.sincronizar(), 0)
+                pendiente = self.almacen.obtener_evento(creado)
+                self.assertEqual((pendiente["id_evento"], pendiente["tipo_evento"]), (id_evento, tipo))
+                self.assertEqual(pendiente["sincronizado"], 0)
+
+                enviados = []
+                cliente = SincronizadorContingencia(
+                    self.almacen, CONFIG, self.logs.append,
+                    post=lambda _url, json, timeout, **_k: (
+                        enviados.append(json["id_evento"])
+                        or RespuestaFalsa({"estado": "APLICADO"})
+                    ),
+                )
+                self.assertEqual(cliente.sincronizar(), 1)
+                self.assertEqual(enviados, [id_evento])
+                self.assertEqual(self.almacen.obtener_eventos_pendientes(), [])
+
     def test_html_con_http_200_conserva_detalle_tecnico_sin_clave(self):
         evento = self.almacen.obtener_evento(self.evento)
         respuesta = RespuestaFalsa(

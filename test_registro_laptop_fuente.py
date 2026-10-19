@@ -67,6 +67,53 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("tipo_evento=DEVOLUCION", self.fuente)
         self.assertIn('id_sesion=sesion_previa["id_sesion"]', self.fuente)
 
+    def test_eventos_durables_solicitan_sincronizacion_inmediata_sin_post_en_ui(self):
+        self.assertIn("def solicitar_sincronizacion_inmediata(tipo_evento):", self.fuente)
+        for traza in (
+            "SINCRONIZACION_INMEDIATA_SOLICITADA tipo=",
+            "SINCRONIZACION_INMEDIATA_INICIADA",
+            "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion",
+        ):
+            self.assertIn(traza, self.fuente)
+
+        solicitud = self.fuente.split(
+            "def solicitar_sincronizacion_inmediata(tipo_evento):", 1
+        )[1].split("def iniciar_sincronizacion_pendientes", 1)[0]
+        self.assertIn("sincronizacion_lock.acquire(blocking=False)", solicitud)
+        self.assertIn("threading.Thread(target=sincronizar, daemon=True).start()", solicitud)
+        self.assertLess(
+            solicitud.index("sincronizacion_lock.acquire(blocking=False)"),
+            solicitud.index("threading.Thread(target=sincronizar, daemon=True).start()"),
+        )
+
+        envio = self.fuente.split("def enviar_evento_local_inmediato(id_evento):", 1)[1].split(
+            "def crear_y_enviar_evento_critico", 1
+        )[0]
+        self.assertIn('solicitar_sincronizacion_inmediata(evento["tipo_evento"])', envio)
+        self.assertNotIn("enviar_evento_coordinador(", envio)
+
+        # PRESTAMO y DEVOLUCION despiertan la cola después de persistir SQLite.
+        self.assertIn('sesion.get("prestamo_evento_id")', self.fuente)
+        self.assertIn('sesion.get("devolucion_evento_id")', self.fuente)
+        # NO_ENTREGA y CIERRE_AUTOMATICO comparten el mismo despachador de cola.
+        self.assertIn('for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):', self.fuente)
+
+    def test_devolucion_durable_solicita_cola_sin_esperar_post(self):
+        salida = self.fuente.split("def registrar_salida_con_reintentos(", 1)[1].split(
+            "def mostrar_ventana_espera_registro", 1
+        )[0]
+        self.assertIn("registrar_devolucion_offline(", salida)
+        self.assertIn("enviar_evento_local_inmediato(id_evento)", salida)
+        self.assertLess(
+            salida.index("registrar_devolucion_offline("),
+            salida.index("enviar_evento_local_inmediato(id_evento)"),
+        )
+        self.assertNotIn("enviar_evento_coordinador(", salida)
+
+    def test_sincronizacion_periodica_e_inicial_se_conservan_como_respaldo(self):
+        self.assertIn("ventana.after(15000, sincronizar_pendientes_periodicamente)", self.fuente)
+        self.assertIn("ventana.after(45000, sincronizar_pendientes_periodicamente)", self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()

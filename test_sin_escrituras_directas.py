@@ -21,7 +21,8 @@ class PruebasSinEscriturasDirectas(unittest.TestCase):
 
     def test_operaciones_criticas_pasan_por_cliente_unico(self):
         fuente = (Path(__file__).parent / "registro_laptop.pyw").read_text(encoding="utf-8-sig")
-        self.assertIn("enviar_evento_coordinador", fuente)
+        self.assertIn("SincronizadorContingencia", fuente)
+        self.assertNotIn("enviar_evento_coordinador(", fuente)
         self.assertIn("registrar_prestamo_coordinador", fuente)
 
 
