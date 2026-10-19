@@ -218,14 +218,13 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
 
     def test_dispatcher_central_separa_contingencia_y_salida(self):
         modulo = self._funciones_ast("_accion_atajo_administrativo")
-        espacio = {"ESTADO_NO_DETECTADO": "NO_DETECTADO", "ESTADO_ERROR": "ERROR"}
+        espacio = {}
         exec(compile(ast.fix_missing_locations(modulo), "<accion>", "exec"), espacio)
         accion = espacio["_accion_atajo_administrativo"]
-        self.assertEqual(accion("NO_DETECTADO"), "CONTINGENCIA_PROXIMIDAD")
-        self.assertEqual(accion("ERROR"), "CONTINGENCIA_PROXIMIDAD")
-        self.assertEqual(accion("LEJOS"), "SALIDA_ADMINISTRATIVA")
+        for estado in ("NO_DETECTADO", "ERROR", "LEJOS"):
+            self.assertEqual(accion(estado), "CONTINUAR_SIN_PROXIMIDAD")
 
-    def test_atajo_central_instrumenta_y_lejos_abre_admin(self):
+    def test_atajo_central_envia_proximidad_a_bypass_y_salida_solo_shift(self):
         manejador = self.fuente.split(
             "def manejar_atajo_administrativo(", 1
         )[1].split(
@@ -236,7 +235,8 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("ESTADO_PROXIMIDAD_ACTUAL", manejador)
         self.assertIn("CONTINGENCIA_ABIERTA_FLAG", manejador)
         self.assertIn("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD", manejador)
-        self.assertIn("CONTINGENCIA_PROXIMIDAD_RECHAZADA estado=", manejador)
+        self.assertIn('accion == "CONTINUAR_SIN_PROXIMIDAD"', manejador)
+        self.assertIn("ATAJO_CTRL_ALT_U_RECHAZADO motivo=SIN_PROXIMIDAD_ACTIVA", manejador)
         self.assertIn("_solicitar_salida_administrativa", manejador)
         self.assertIn("finally:", manejador)
         self.assertIn("atajo_administrativo_en_curso = False", manejador)
@@ -409,15 +409,86 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertTrue(vivo.foco)
         self.assertIn("ADMIN_GRAB_RESTAURADO", logs)
 
-    def test_autenticacion_existente_autoriza_una_sola_salida(self):
+    def test_dialogo_admin_separa_bypass_y_salida_por_intencion(self):
         admin = self.fuente.split("def abrir_acceso_administrativo", 1)[1].split(
             "def iniciar_contexto_contingencia", 1
         )[0]
         self.assertIn("hmac.compare_digest(hash_ingresado, HASH_CLAVE_ADMIN)", admin)
-        self.assertIn("ADMIN_SALIDA_AUTORIZADA", admin)
+        self.assertIn('accion="SALIR_SISTEMA"', admin)
+        self.assertIn('"CONTINUAR_SIN_PROXIMIDAD"', admin)
+        self.assertIn("ADMIN_DIALOGO_SOLICITADO accion={accion}", admin)
+        self.assertIn("ADMIN_AUTORIZACION_CORRECTA accion={accion}", admin)
+        self.assertIn('if accion == "CONTINUAR_SIN_PROXIMIDAD":', admin)
+        self.assertIn("al_autorizar()", admin)
+        self.assertIn("SALIDA_ADMIN_AUTORIZADA", admin)
         self.assertIn("cerrar_aplicacion()", admin)
         self.assertIn('show="*"', admin)
         self.assertNotIn("registrar_evento_tecnico(clave", admin)
+
+    def test_bypass_autorizado_cierra_solo_dialogo_de_proximidad(self):
+        modulo = self._funciones_ast("_autorizar_bypass_proximidad")
+        eventos = []
+        usos = []
+        espacio = {
+            "contexto_contingencia_proximidad": None,
+            "registrar_evento_tecnico": eventos.append,
+            "registrar_uso_contingencia": lambda operacion, matricula: usos.append(
+                (operacion, matricula)
+            ),
+        }
+        exec(compile(ast.fix_missing_locations(modulo), "<bypass>", "exec"), espacio)
+
+        for estado in ("LEJOS", "NO_DETECTADO", "ERROR"):
+            cierres = []
+            contexto = {
+                "estado": estado,
+                "operacion": "PRESTAMO",
+                "matricula": "0824118010",
+                "autorizado": False,
+                "cerrar_dialogo_fallo": lambda: cierres.append(estado),
+            }
+            espacio["contexto_contingencia_proximidad"] = contexto
+            espacio["_autorizar_bypass_proximidad"](contexto)
+            self.assertTrue(contexto["autorizado"])
+            self.assertEqual(cierres, [estado])
+            espacio["_autorizar_bypass_proximidad"](contexto)
+            self.assertEqual(cierres, [estado])
+
+        self.assertEqual(len(usos), 3)
+        self.assertIn("PROXIMIDAD_BYPASS_ADMIN_AUTORIZADO estado=LEJOS", eventos)
+
+    def test_bypass_reanuda_prestamo_y_devolucion_sin_duplicar_sesion(self):
+        self.assertEqual(self.fuente.count("if contingencia_autorizada:"), 2)
+        self.assertEqual(self.fuente.count("procesar_resultado_proximidad(True, None)"), 1)
+        self.assertEqual(self.fuente.count("procesar_proximidad(True, None)"), 1)
+        self.assertIn("mostrar_confirmacion_simple(", self.fuente)
+        self.assertIn("threading.Thread(target=comprobar_devolucion, daemon=True).start()", self.fuente)
+        solicitud = self.fuente.split("def _solicitar_contingencia_proximidad", 1)[1].split(
+            "def _solicitar_salida_administrativa", 1
+        )[0]
+        self.assertIn('accion="CONTINUAR_SIN_PROXIMIDAD"', solicitud)
+        self.assertIn("al_autorizar=lambda: _autorizar_bypass_proximidad(contexto)", solicitud)
+
+    def test_salida_shift_usa_intencion_exclusiva(self):
+        salida = self.fuente.split("def _solicitar_salida_administrativa", 1)[1].split(
+            "def manejar_evento_administrativo", 1
+        )[0]
+        self.assertIn('accion="SALIR_SISTEMA"', salida)
+        self.assertIn('"<Control-Alt-Shift-u>"', self.fuente)
+        self.assertIn('"<Control-Alt-Shift-U>"', self.fuente)
+
+    def test_cancelar_o_clave_incorrecta_no_ejecutan_el_callback_bypass(self):
+        admin = self.fuente.split("def abrir_acceso_administrativo", 1)[1].split(
+            "def iniciar_contexto_contingencia", 1
+        )[0]
+        autenticar = admin.split("    def autenticar():", 1)[1].split(
+            "    tk.Button(", 1
+        )[0]
+        self.assertIn("completar_autorizacion()", autenticar)
+        self.assertIn("return", autenticar)
+        self.assertIn('intentos_incorrectos["cantidad"] += 1', autenticar)
+        self.assertNotIn("al_autorizar", autenticar)
+        self.assertIn("command=cerrar", admin)
 
     def test_clave_incorrecta_no_cierra_y_flags_se_liberan_ante_excepcion(self):
         admin = self.fuente.split("def abrir_acceso_administrativo", 1)[1].split(

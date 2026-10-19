@@ -1174,17 +1174,29 @@ def finalizar_dialogo_administrativo(motivo="CANCELADO", restaurar=True, dialogo
     return True
 
 
-def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO"):
+def abrir_acceso_administrativo(
+    event=None,
+    parent=None,
+    contexto="DESCONOCIDO",
+    accion="SALIR_SISTEMA",
+    al_autorizar=None,
+):
     global dialogo_admin_abierto, dialogo_admin_referencia, dialogo_admin_estado
 
     registrar_evento_tecnico(
-        f"ADMIN_SOLICITUD estado_guard={dialogo_admin_abierto} contexto={contexto}"
+        f"ADMIN_SOLICITUD estado_guard={dialogo_admin_abierto} "
+        f"contexto={contexto} accion={accion}"
     )
     if dialogo_admin_abierto:
         return "break"
 
+    if accion not in ("CONTINUAR_SIN_PROXIMIDAD", "SALIR_SISTEMA"):
+        raise ValueError(f"Acción administrativa no válida: {accion}")
+
     parent = parent or ventana
-    registrar_evento_tecnico(f"ADMIN_DIALOGO_SOLICITADO contexto={contexto}")
+    registrar_evento_tecnico(
+        f"ADMIN_DIALOGO_SOLICITADO accion={accion} contexto={contexto}"
+    )
 
     grab_anterior = None
     foco_anterior = None
@@ -1216,7 +1228,21 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
         "after_pendientes": [],
         "finalizado": False,
     }
-    dialogo.title("Cierre administrativo")
+    es_bypass_proximidad = accion == "CONTINUAR_SIN_PROXIMIDAD"
+    titulo = (
+        "Autorización administrativa"
+        if es_bypass_proximidad else "Cierre administrativo"
+    )
+    mensaje = (
+        "Introduzca la contraseña administrativa para continuar sin "
+        "verificación de proximidad."
+        if es_bypass_proximidad else
+        "Introduzca la contraseña administrativa para cerrar el sistema."
+    )
+    texto_boton = "CONTINUAR" if es_bypass_proximidad else "CERRAR SISTEMA"
+    tipo_boton = "principal" if es_bypass_proximidad else "error"
+
+    dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
     dialogo.transient(parent)
@@ -1228,7 +1254,7 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
 
     tk.Label(
         contenido,
-        text="Cierre administrativo",
+        text=titulo,
         font=FUENTE_SUBTITULO,
         fg=COLOR_TEXTO,
         bg=COLOR_TARJETA
@@ -1236,7 +1262,7 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
 
     mensaje_label = tk.Label(
         contenido,
-        text="Introduzca la contraseña administrativa para cerrar el sistema.",
+        text=mensaje,
         font=FUENTE_CUERPO,
         fg=COLOR_TEXTO_SECUNDARIO,
         bg=COLOR_TARJETA
@@ -1279,13 +1305,20 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
     def cerrar(motivo="CANCELADO", restaurar=True):
         finalizar_dialogo_administrativo(motivo, restaurar, dialogo)
 
-    def cerrar_sistema():
+    def completar_autorizacion():
         global contexto_contingencia_proximidad
         global confirmacion_contingencia_abierta
         global ventana_entrega_activa
 
-        registrar_evento_tecnico("ADMIN_SALIDA_AUTORIZADA")
+        registrar_evento_tecnico(f"ADMIN_AUTORIZACION_CORRECTA accion={accion}")
         cerrar("AUTORIZADO", restaurar=False)
+
+        if accion == "CONTINUAR_SIN_PROXIMIDAD":
+            if al_autorizar:
+                al_autorizar()
+            return
+
+        registrar_evento_tecnico("SALIDA_ADMIN_AUTORIZADA")
         contexto_contingencia_proximidad = None
         confirmacion_contingencia_abierta = False
         ventana_entrega_activa = None
@@ -1299,7 +1332,7 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
         clave = ""
 
         if hmac.compare_digest(hash_ingresado, HASH_CLAVE_ADMIN):
-            cerrar_sistema()
+            completar_autorizacion()
             return
 
         intentos_incorrectos["cantidad"] += 1
@@ -1324,11 +1357,11 @@ def abrir_acceso_administrativo(event=None, parent=None, contexto="DESCONOCIDO")
 
     tk.Button(
         botones,
-        text="CERRAR SISTEMA",
+        text=texto_boton,
         padx=20,
         pady=8,
         command=autenticar,
-        **estilo_boton("error")
+        **estilo_boton(tipo_boton)
     ).pack(side=tk.RIGHT)
 
     def al_destruir(event):
@@ -1458,47 +1491,47 @@ def _contexto_visual_administrativo(event=None, origen=None):
 
 
 def _accion_atajo_administrativo(estado_proximidad):
-    """Separa la contingencia de proximidad de la salida administrativa."""
-    if estado_proximidad in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
-        return "CONTINGENCIA_PROXIMIDAD"
-    return "SALIDA_ADMINISTRATIVA"
+    """Ctrl+Alt+U siempre pide autorización para omitir proximidad activa."""
+    del estado_proximidad
+    return "CONTINUAR_SIN_PROXIMIDAD"
 
 
-def _solicitar_contingencia_proximidad(contexto):
-    global confirmacion_contingencia_abierta
+def _autorizar_bypass_proximidad(contexto):
+    """Marca el contexto en espera y cierra sólo su diálogo de proximidad."""
+    if contexto_contingencia_proximidad is not contexto or contexto.get("autorizado"):
+        return
+    estado = contexto.get("estado")
+    registrar_evento_tecnico(
+        f"PROXIMIDAD_BYPASS_ADMIN_AUTORIZADO estado={estado}"
+    )
+    contexto["autorizado"] = True
+    registrar_uso_contingencia(
+        contexto["operacion"],
+        contexto["matricula"],
+    )
+    cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
+    if cerrar_dialogo_fallo:
+        cerrar_dialogo_fallo()
 
+
+def _solicitar_contingencia_proximidad(contexto, event=None, origen=None):
     estado = contexto.get("estado")
     registrar_evento_tecnico(
         f"CONTINGENCIA_PROXIMIDAD_SOLICITADA estado={estado}"
     )
-    if confirmacion_contingencia_abierta:
-        registrar_evento_tecnico(
-            "ATAJO_CTRL_ALT_U_RECHAZADO motivo=confirmacion_ya_abierta"
-        )
-        return "break"
-
-    confirmacion_contingencia_abierta = True
-    try:
-        dialogo_fallo = contexto.get("dialogo")
-        parent = dialogo_fallo if _widget_tk_vivo(dialogo_fallo) else contexto["parent"]
-        continuar = mostrar_confirmacion_personalizada(
-            "Continuar sin verificación",
-            "No fue posible detectar el carrito.\n"
-            "¿Desea continuar con el proceso sin validar la proximidad?",
-            parent=parent,
-        )
-        if continuar:
-            contexto["autorizado"] = True
-            registrar_uso_contingencia(
-                contexto["operacion"],
-                contexto["matricula"],
-            )
-        cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
-        if cerrar_dialogo_fallo:
-            cerrar_dialogo_fallo()
-    finally:
-        confirmacion_contingencia_abierta = False
-    return "break"
+    dialogo_fallo = contexto.get("dialogo")
+    parent = (
+        dialogo_fallo
+        if _widget_tk_vivo(dialogo_fallo)
+        else contexto["parent"]
+    )
+    return abrir_acceso_administrativo(
+        event,
+        parent=parent,
+        contexto=f"PROXIMIDAD_{estado}",
+        accion="CONTINUAR_SIN_PROXIMIDAD",
+        al_autorizar=lambda: _autorizar_bypass_proximidad(contexto),
+    )
 
 
 def _solicitar_salida_administrativa(event, origen, contexto):
@@ -1507,6 +1540,7 @@ def _solicitar_salida_administrativa(event, origen, contexto):
         event,
         parent=parent,
         contexto=contexto,
+        accion="SALIR_SISTEMA",
     )
 
 
@@ -1603,17 +1637,18 @@ def manejar_atajo_administrativo(
                 f"CONTINGENCIA_ABIERTA_FLAG={confirmacion_contingencia_abierta}"
             )
             accion = _accion_atajo_administrativo(estado)
-            if accion == "CONTINGENCIA_PROXIMIDAD":
-                return _solicitar_contingencia_proximidad(contexto_proximidad)
+            if accion == "CONTINUAR_SIN_PROXIMIDAD":
+                return _solicitar_contingencia_proximidad(
+                    contexto_proximidad,
+                    event,
+                    origen,
+                )
 
+        if not forzar_salida:
             registrar_evento_tecnico(
-                f"CONTINGENCIA_PROXIMIDAD_RECHAZADA estado={estado}"
+                "ATAJO_CTRL_ALT_U_RECHAZADO motivo=SIN_PROXIMIDAD_ACTIVA"
             )
-            return _solicitar_salida_administrativa(
-                event,
-                origen,
-                contexto=f"PROXIMIDAD_{estado}",
-            )
+            return "break"
 
         parent = _contexto_visual_administrativo(event, origen)
         contexto = "LOGIN" if parent == ventana else "MODAL"
@@ -3280,7 +3315,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 )
 
                 contingencia_autorizada = finalizar_contexto_contingencia()
-                if permite_contingencia and contingencia_autorizada:
+                if contingencia_autorizada:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                     modal_progreso = crear_modal_verificacion_ubicacion(
                         ventana,
@@ -4384,7 +4419,7 @@ def iniciar_sesion():
                 cancelar_timeout_inactividad()
 
             contingencia_autorizada = finalizar_contexto_contingencia()
-            if permite_contingencia and contingencia_autorizada:
+            if contingencia_autorizada:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                 procesar_proximidad(True, None)
                 return
