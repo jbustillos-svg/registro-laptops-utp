@@ -114,6 +114,36 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("ventana.after(15000, sincronizar_pendientes_periodicamente)", self.fuente)
         self.assertIn("ventana.after(45000, sincronizar_pendientes_periodicamente)", self.fuente)
 
+    def test_devolucion_pre_apagado_usa_un_intento_breve_del_sincronizador_actual(self):
+        self.assertIn("TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)", self.fuente)
+        previa = self.fuente.split("def sincronizar_devolucion_pre_apagado(id_evento):", 1)[1].split(
+            "def iniciar_sincronizacion_pendientes", 1
+        )[0]
+        self.assertIn("sincronizacion_lock.acquire(blocking=False)", previa)
+        self.assertIn(".sincronizar_evento(id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO)", previa)
+        self.assertIn("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_APLICADA", previa)
+        self.assertIn("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_PENDIENTE", previa)
+
+    def test_entrega_guarda_antes_de_sincronizar_y_apagar_sin_doble_worker(self):
+        espera = self.fuente.split("def mostrar_ventana_espera_registro(", 1)[1].split(
+            "def entregar_y_apagar", 1
+        )[0]
+        self.assertIn("solicitar_sincronizacion=False", espera)
+        self.assertIn('"Registrando entrega..."', espera)
+        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
+        self.assertNotIn("time.sleep(", espera)
+        self.assertLess(
+            espera.index("registrar_salida_con_reintentos("),
+            espera.index("sincronizar_devolucion_pre_apagado(id_evento)"),
+        )
+        self.assertLess(
+            espera.index("sincronizar_devolucion_pre_apagado(id_evento)"),
+            espera.index("apagar_windows()"),
+        )
+        self.assertIn("if exito:", espera)
+        self.assertIn("if not sesion:\n            return False", espera)
+        self.assertIn("state=\"disabled\"", self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()

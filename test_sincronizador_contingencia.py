@@ -146,6 +146,85 @@ class PruebasClienteCoordinador(unittest.TestCase):
                 self.assertEqual(enviados, [id_evento])
                 self.assertEqual(self.almacen.obtener_eventos_pendientes(), [])
 
+    def test_devolucion_pre_apagado_rapida_confirma_hora_original(self):
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        entrega = self.almacen.registrar_devolucion_offline(
+            "A1", "LAP-1", "2026-10-16", "14:00:17",
+            id_sesion=sesion["id_sesion"],
+        )
+        enviados = []
+        cliente = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: (
+                enviados.append((json, timeout))
+                or RespuestaFalsa({"estado": "APLICADO", "referencia_registro": "Registros!3"})
+            ),
+        )
+
+        self.assertTrue(cliente.sincronizar_evento(entrega["devolucion_evento_id"]))
+        self.assertEqual(enviados[0][0]["hora_evento"], "14:00:17")
+        self.assertEqual(enviados[0][1], (2, 3))
+        self.assertEqual(
+            self.almacen.obtener_evento(entrega["devolucion_evento_id"])["hora_evento"],
+            "14:00:17",
+        )
+        self.assertEqual(
+            self.almacen.obtener_evento(entrega["devolucion_evento_id"])["sincronizado"], 1
+        )
+
+    def test_devolucion_pre_apagado_sin_internet_queda_pendiente(self):
+        # Se crea una sesión explícita para que la devolución sea durable.
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        entrega = self.almacen.registrar_devolucion_offline(
+            "A1", "LAP-1", "2026-10-16", "14:00:17",
+            id_sesion=sesion["id_sesion"],
+        )
+        cliente = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda *_a, **_k: (_ for _ in ()).throw(requests.ConnectionError()),
+        )
+
+        self.assertFalse(cliente.sincronizar_evento(entrega["devolucion_evento_id"]))
+        pendiente = self.almacen.obtener_evento(entrega["devolucion_evento_id"])
+        self.assertEqual((pendiente["sincronizado"], pendiente["hora_evento"]), (0, "14:00:17"))
+
+        enviados = []
+        reintento = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: (
+                enviados.append(json["hora_evento"])
+                or RespuestaFalsa({"estado": "APLICADO"})
+            ),
+        )
+        self.assertTrue(reintento.sincronizar_evento(entrega["devolucion_evento_id"]))
+        self.assertEqual(enviados, ["14:00:17"])
+
+    def test_devolucion_pre_apagado_timeout_o_http_deja_evento_pendiente(self):
+        for causa in (
+            lambda: (_ for _ in ()).throw(requests.Timeout()),
+            lambda: RespuestaFalsa({}, texto="error", status_code=503),
+        ):
+            with self.subTest(causa=causa):
+                sesion = self.almacen.registrar_prestamo_offline(
+                    "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+                )
+                entrega = self.almacen.registrar_devolucion_offline(
+                    "A1", "LAP-1", "2026-10-16", "14:00:17",
+                    id_sesion=sesion["id_sesion"],
+                )
+                cliente = SincronizadorContingencia(
+                    self.almacen, CONFIG, self.logs.append,
+                    post=lambda *_a, **_k: causa(),
+                )
+                self.assertFalse(cliente.sincronizar_evento(entrega["devolucion_evento_id"]))
+                self.assertEqual(
+                    self.almacen.obtener_evento(entrega["devolucion_evento_id"])["sincronizado"], 0
+                )
+
     def test_html_con_http_200_conserva_detalle_tecnico_sin_clave(self):
         evento = self.almacen.obtener_evento(self.evento)
         respuesta = RespuestaFalsa(

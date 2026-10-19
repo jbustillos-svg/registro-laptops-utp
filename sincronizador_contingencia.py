@@ -18,6 +18,7 @@ TIMEOUT_CONEXION = 3
 TIMEOUT_RESPUESTA = 12
 TIMEOUT_INTERACTIVO = (2, 5)
 TIMEOUT_SEGUNDO_PLANO = (TIMEOUT_CONEXION, TIMEOUT_RESPUESTA)
+TIMEOUT_PRE_APAGADO = (2, 3)
 
 
 class ErrorCoordinador(RuntimeError):
@@ -223,10 +224,40 @@ class SincronizadorContingencia:
             "datos": datos,
         }
 
-    def _enviar(self, evento):
+    def _enviar(self, evento, timeout=TIMEOUT_SEGUNDO_PLANO):
         return enviar_evento_coordinador(
-            evento, self.configuracion, self._post, TIMEOUT_SEGUNDO_PLANO
+            evento, self.configuracion, self._post, timeout
         )
+
+    def sincronizar_evento(self, id_evento, timeout=TIMEOUT_PRE_APAGADO):
+        """Intenta una sola vez un evento durable concreto, sin cambiar su UUID u hora."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            evento = self.almacen.obtener_evento(id_evento)
+            if not evento:
+                return False
+            if evento.get("sincronizado"):
+                return True
+            if not self.configuracion.get("URL_APPS_SCRIPT") or not self.configuracion.get("API_KEY"):
+                return False
+            with self._bloqueo_interproceso() as adquirido:
+                if not adquirido:
+                    return False
+                try:
+                    referencia = self._enviar(evento, timeout)
+                    self.almacen.marcar_sincronizado(evento["id_evento"], referencia)
+                    return True
+                except Exception as error:
+                    self.almacen.incrementar_intentos(evento["id_evento"], str(error)[:500])
+                    self.registrar(
+                        "SINCRONIZACION_EVENTO_ERROR "
+                        f"id={evento['id_evento']} tipo={evento['tipo_evento']} "
+                        f"{diagnostico_error_coordinador(error)}"
+                    )
+                    return False
+        finally:
+            self._lock.release()
 
     def sincronizar(self, limite=30):
         """Confirma SQLite sólo después de una respuesta final del coordinador."""

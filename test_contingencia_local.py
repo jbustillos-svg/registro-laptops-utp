@@ -143,6 +143,31 @@ class PruebasContingenciaLocal(unittest.TestCase):
         devolucion = next(evento for evento in eventos if evento["tipo_evento"] == "DEVOLUCION")
         self.assertEqual(devolucion["hora_evento"], "11:19:40")
 
+    def test_error_sqlite_antes_de_devolucion_no_cierra_sesion_ni_crea_evento(self):
+        self.almacen.inicializar()
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "10:14:32"
+        )
+        with self.almacen._conexion() as conexion:
+            conexion.execute(
+                """
+                CREATE TRIGGER bloquear_devolucion_prueba
+                BEFORE UPDATE OF hora_salida ON sesiones_locales
+                BEGIN SELECT RAISE(ABORT, 'FALLO_SQLITE_DEVOLUCION'); END
+                """
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "FALLO_SQLITE_DEVOLUCION"):
+            self.almacen.registrar_devolucion_offline(
+                "A1", "LAP-1", "2026-10-16", "11:19:40",
+                id_sesion=sesion["id_sesion"],
+            )
+        activa = self.almacen.obtener_sesion_activa("LAP-1")
+        self.assertEqual((activa["id_sesion"], activa["hora_salida"]), (sesion["id_sesion"], None))
+        self.assertFalse(any(
+            evento["tipo_evento"] == "DEVOLUCION"
+            for evento in self.almacen.obtener_eventos_pendientes()
+        ))
+
     def test_prestamo_online_admite_devolucion_offline(self):
         self.almacen.inicializar()
         self.almacen.registrar_prestamo_online(

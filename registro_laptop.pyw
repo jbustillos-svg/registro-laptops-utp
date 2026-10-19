@@ -90,6 +90,7 @@ diagnostico_conectividad = {
 }
 
 TIEMPO_INACTIVIDAD_MS = 60000
+TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)
 timeout_inactividad_id = None
 timeout_inactividad_activo = False
 flujo_cancelado_por_inactividad = False
@@ -285,7 +286,7 @@ def registrar_sesion_pendiente_al_iniciar():
     return sesion
 
 
-def registrar_devolucion_contingencia(matricula):
+def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
     if almacen_contingencia is None:
         return False
     try:
@@ -312,9 +313,9 @@ def registrar_devolucion_contingencia(matricula):
             f"CONTINGENCIA_DEVOLUCION_GUARDADA matricula={matricula} fecha={fecha} hora={hora}"
         )
         id_evento = sesion.get("devolucion_evento_id")
-        if id_evento:
+        if id_evento and solicitar_sincronizacion:
             enviar_evento_local_inmediato(id_evento)
-        return True
+        return sesion
     except Exception as error:
         registrar_evento_tecnico(
             f"CONTINGENCIA_DEVOLUCION_ERROR={type(error).__name__}: {error}"
@@ -427,6 +428,50 @@ def solicitar_sincronizacion_inmediata(tipo_evento):
 
     threading.Thread(target=sincronizar, daemon=True).start()
     return True
+
+
+def sincronizar_devolucion_pre_apagado(id_evento):
+    """Da una sola oportunidad breve a DEVOLUCION antes del shutdown.
+
+    SQLite ya contiene el evento y su hora original al entrar aquí. Un fallo de
+    red sólo conserva la cola pendiente: no cambia el resultado de la entrega.
+    """
+    if almacen_contingencia is None:
+        return False
+    try:
+        evento = almacen_contingencia.obtener_evento(id_evento)
+    except Exception as error:
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_ERROR="
+            f"{type(error).__name__}"
+        )
+        return False
+    if not evento or evento.get("tipo_evento") != "DEVOLUCION":
+        return False
+    registrar_evento_tecnico("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_INICIADA")
+    if not sincronizacion_lock.acquire(blocking=False):
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_OMITIDA motivo=ya_en_ejecucion"
+        )
+        return False
+    try:
+        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+        aplicada = SincronizadorContingencia(
+            almacen_contingencia, configuracion, registrar_evento_tecnico
+        ).sincronizar_evento(id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO)
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_APLICADA"
+            if aplicada else "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_PENDIENTE"
+        )
+        return aplicada
+    except Exception as error:
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_ERROR="
+            f"{type(error).__name__}"
+        )
+        return False
+    finally:
+        sincronizacion_lock.release()
 
 
 def iniciar_sincronizacion_pendientes():
@@ -2722,7 +2767,8 @@ def _existe_entrada_del_mismo_intento(
 
 
 def registrar_salida_con_reintentos(
-    nombre, matricula, max_reintentos=3, callback_intento=None
+    nombre, matricula, max_reintentos=3, callback_intento=None,
+    solicitar_sincronizacion=True,
 ):
     # No se confirmó Hora_Salida: el evento durable queda pendiente y no se apaga.
     del nombre, max_reintentos
@@ -2749,10 +2795,11 @@ def registrar_salida_con_reintentos(
             f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
         )
         id_evento = sesion.get("devolucion_evento_id")
-        # La devolución queda durable localmente incluso si el POST vence; permite apagar.
-        if id_evento:
+        # La UI de entrega puede reservar este único evento para el intento
+        # breve pre-apagado; los demás llamadores conservan el daemon normal.
+        if id_evento and solicitar_sincronizacion:
             enviar_evento_local_inmediato(id_evento)
-        return True
+        return sesion
     except Exception as error:
         registrar_evento_tecnico(f"COORDINADOR_DEVOLUCION_ERROR={type(error).__name__}")
         return False
@@ -2774,19 +2821,30 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
             )
 
         if modo_contingencia:
-            exito = registrar_devolucion_contingencia(matricula)
+            sesion = registrar_devolucion_contingencia(
+                matricula, solicitar_sincronizacion=False
+            )
         else:
-            exito = registrar_salida_con_reintentos(
+            sesion = registrar_salida_con_reintentos(
                 nombre, matricula, max_reintentos=3,
-                callback_intento=notificar_intento
+                callback_intento=notificar_intento,
+                solicitar_sincronizacion=False,
             )
-        if exito:
-            ejecutar_en_ui(
-                actualizar_progreso,
-                "Registro completado. Finalizando..."
+        if not sesion:
+            return False
+
+        id_evento = sesion.get("devolucion_evento_id")
+        if not id_evento:
+            registrar_evento_tecnico(
+                "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_OMITIDA motivo=EVENTO_NO_ENCONTRADO"
             )
-            time.sleep(1)
-        return exito
+            return False
+        ejecutar_en_ui(
+            actualizar_progreso,
+            "Registrando entrega..."
+        )
+        sincronizar_devolucion_pre_apagado(id_evento)
+        return True
 
     def finalizar_registro(exito):
         cerrar_modal_verificacion_ubicacion(ventana_espera)
