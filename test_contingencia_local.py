@@ -3,6 +3,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import json
 
 from contingencia_local import (
     CACHE_NO_DISPONIBLE,
@@ -298,6 +299,60 @@ class PruebasContingenciaLocal(unittest.TestCase):
         )
         self.assertEqual(nuevo["matricula"], "B1")
         self.assertEqual(reiniciado.obtener_sesion_activa("LAP-1")["matricula"], "B1")
+
+    def test_sincronizacion_tardia_y_reintentos_de_a_no_cierran_sesion_b(self):
+        self.almacen.inicializar()
+        sesion_a = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        cierre_a = self.almacen.resolver_sesion_activa_por_nueva_matricula(
+            "LAP-1", "B1", "2026-10-16", "10:00:00"
+        )["sesion"]
+        sesion_b = self.almacen.registrar_prestamo_coordinador(
+            "B1", "Beto", "LAP-1", "2026-10-16", "10:01:00"
+        )
+
+        for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+            evento_a = self.almacen.obtener_evento(cierre_a[campo])
+            self.assertEqual(json.loads(evento_a["datos_json"])["id_sesion"], sesion_a["id_sesion"])
+            self.almacen.marcar_sincronizado(evento_a["id_evento"], "Registros!2")
+
+        for _ in range(3):
+            self.almacen.registrar_no_entrega_local(
+                "A1", "LAP-1", "2026-10-16", "10:02:00",
+                id_sesion=sesion_a["id_sesion"],
+            )
+            self.almacen.registrar_cierre_automatico_local(
+                "A1", "LAP-1", "2026-10-16", "10:02:00",
+                id_sesion=sesion_a["id_sesion"],
+            )
+
+        activa = self.almacen.obtener_sesion_activa("LAP-1")
+        self.assertEqual(activa["id_sesion"], sesion_b["id_sesion"])
+        self.assertEqual(activa["matricula"], "B1")
+
+        devolucion_b = self.almacen.registrar_devolucion_offline(
+            "B1", "LAP-1", "2026-10-16", "10:03:00",
+            id_sesion=sesion_b["id_sesion"],
+        )
+        self.assertEqual(devolucion_b["id_sesion"], sesion_b["id_sesion"])
+        self.assertIsNone(self.almacen.obtener_sesion_activa("LAP-1"))
+
+    def test_cierre_por_id_sesion_inexistente_no_toca_sesion_activa(self):
+        self.almacen.inicializar()
+        sesion_b = self.almacen.registrar_prestamo_offline(
+            "B1", "Beto", "LAP-1", "2026-10-16", "10:00:00"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "sesi.n local para cerrar"):
+            self.almacen.registrar_cierre_automatico_local(
+                "A1", "LAP-1", "2026-10-16", "10:01:00",
+                id_sesion="sesion-inexistente",
+            )
+
+        activa = self.almacen.obtener_sesion_activa("LAP-1")
+        self.assertEqual(activa["id_sesion"], sesion_b["id_sesion"])
+        self.assertIsNone(activa["hora_salida"])
 
     def test_devolucion_tras_reinicio_reutiliza_la_sesion_activa_correcta(self):
         self.almacen.inicializar()

@@ -269,6 +269,10 @@ def obtener_sesion_local_activa(matricula=None):
         sesion = almacen_contingencia.obtener_sesion_activa(socket.gethostname())
         if sesion and matricula and sesion["matricula"] != str(matricula).strip():
             return None
+        if sesion:
+            registrar_evento_tecnico(
+                f"SESION_ACTIVA_CONSULTADA id_sesion={sesion['id_sesion']}"
+            )
         return sesion
     except Exception as error:
         registrar_evento_tecnico(
@@ -296,8 +300,23 @@ def registrar_devolucion_contingencia(matricula):
         return False
     try:
         fecha, hora = _fecha_hora_local()
-        almacen_contingencia.registrar_devolucion_offline(
-            matricula, socket.gethostname(), fecha, hora
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_SIN_SESION_ACTIVA"
+            )
+            return False
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
+        sesion = almacen_contingencia.registrar_devolucion_offline(
+            matricula, socket.gethostname(), fecha, hora,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
         )
         registrar_evento_tecnico(
             f"CONTINGENCIA_DEVOLUCION_GUARDADA matricula={matricula} fecha={fecha} hora={hora}"
@@ -314,8 +333,23 @@ def persistir_devolucion_online_local(matricula, hora_salida):
     if almacen_contingencia is None:
         return
     try:
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_ONLINE_SIN_SESION_ACTIVA"
+            )
+            return
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
         almacen_contingencia.registrar_devolucion_online(
-            matricula, socket.gethostname(), hora_salida
+            matricula, socket.gethostname(), hora_salida,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion_previa['id_sesion']}"
         )
     except Exception as error:
         registrar_evento_tecnico(
@@ -388,13 +422,29 @@ def cerrar_sesion_contingencia_por_nueva_sesion(matricula_nueva):
         laptop_id = socket.gethostname()
         previa = obtener_sesion_local_activa()
         if not previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=CIERRE_AUTOMATICO_SIN_SESION_ACTIVA"
+            )
             return True
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={previa['id_sesion']} tipo_evento=NO_ENTREGA"
+        )
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={previa['id_sesion']} tipo_evento=CIERRE_AUTOMATICO"
+        )
         resultado = almacen_contingencia.resolver_sesion_activa_por_nueva_matricula(
             laptop_id, matricula_nueva, fecha, hora, laptop_id,
             registrar_no_entrega=not matricula_exenta_no_entrega(previa["matricula"]),
         )
         sesion = resultado.get("sesion")
         if resultado["resultado"] != "SESION_ANTERIOR_CERRADA":
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO "
+                f"id_sesion={previa['id_sesion']} motivo={resultado['resultado']}"
+            )
             return resultado["resultado"] == "SIN_SESION"
         for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
             id_evento = sesion.get(campo)
@@ -403,6 +453,9 @@ def cerrar_sesion_contingencia_por_nueva_sesion(matricula_nueva):
         registrar_evento_tecnico(
             "CONTINGENCIA_CIERRE_AUTOMATICO "
             f"matricula_anterior={sesion['matricula']} matricula_nueva={matricula_nueva}"
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
         )
         return True
     except Exception as error:
@@ -2657,8 +2710,23 @@ def registrar_salida_con_reintentos(
         callback_intento(1, 1)
     try:
         fecha, hora = _fecha_hora_local()
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_SIN_SESION_ACTIVA"
+            )
+            return False
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
         sesion = almacen_contingencia.registrar_devolucion_offline(
-            matricula, socket.gethostname(), fecha, hora
+            matricula, socket.gethostname(), fecha, hora,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
         )
         id_evento = sesion.get("devolucion_evento_id")
         # La devolución queda durable localmente incluso si el POST vence; permite apagar.
@@ -2937,6 +3005,27 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                         break
 
             if not fila_encontrada:
+                sesion_local = obtener_sesion_local_activa(matricula)
+                if sesion_local:
+                    registrar_evento_tecnico(
+                        "SESION_LOCAL_CIERRE_IGNORADO "
+                        f"id_sesion={sesion_local['id_sesion']} "
+                        "motivo=REGISTRO_REMOTO_NO_COINCIDE_USA_EVENTO_DURABLE"
+                    )
+                    actualizar_modal_progreso(
+                        ventana_ubicacion,
+                        titulo_ubicacion,
+                        mensaje_ubicacion,
+                        estado_ubicacion,
+                        "Registro pendiente",
+                        "La sesión local se entregará y sincronizará automáticamente.",
+                        "Guardando devolución..."
+                    )
+                    mostrar_ventana_espera_registro(
+                        ventana, matricula, nombre, modal_progreso,
+                        modo_contingencia=True
+                    )
+                    return
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                 if boton:
                     boton.config(state="normal", text="ENTREGAR Y APAGAR")

@@ -342,6 +342,7 @@ class ContingenciaLocal:
     @staticmethod
     def _datos_fila_registro(sesion):
         return {
+            "id_sesion": sesion["id_sesion"],
             "matricula": sesion["matricula"],
             "nombre": sesion["nombre"],
             "fecha": sesion["fecha_entrada"],
@@ -448,14 +449,19 @@ class ContingenciaLocal:
                         fecha_entrada, hora_entrada, origen, id_evento, ahora, ahora,
                     ),
                 )
-                sesion = conexion.execute(
-                    """
-                    SELECT * FROM sesiones_locales
-                    WHERE laptop_id = ? AND matricula = ?
-                    ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
-                    """,
-                    (laptop_id, str(matricula).strip()),
-                ).fetchone()
+                if id_sesion:
+                    sesion = conexion.execute(
+                        "SELECT * FROM sesiones_locales WHERE id_sesion = ?", (id_sesion,)
+                    ).fetchone()
+                else:
+                    sesion = conexion.execute(
+                        """
+                        SELECT * FROM sesiones_locales
+                        WHERE laptop_id = ? AND matricula = ?
+                        ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
+                        """,
+                        (laptop_id, str(matricula).strip()),
+                    ).fetchone()
                 if id_evento:
                     self._insertar_evento(
                         conexion, id_evento, equipo, "PRESTAMO", sesion,
@@ -515,20 +521,29 @@ class ContingenciaLocal:
         return sesion, False
 
     def registrar_devolucion_offline(self, matricula, laptop_id, fecha_evento,
-                                    hora_evento, equipo=None):
+                                    hora_evento, equipo=None, id_sesion=None):
         """Cierra una sesión local y genera una sola DEVOLUCION pendiente."""
         with self._conexion() as conexion:
             conexion.execute("BEGIN IMMEDIATE")
             try:
-                sesion = conexion.execute(
-                    """
-                    SELECT * FROM sesiones_locales
-                    WHERE laptop_id = ? AND matricula = ?
-                    ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
-                    """,
-                    (laptop_id, str(matricula).strip()),
-                ).fetchone()
-                if not sesion or sesion["matricula"] != str(matricula).strip():
+                if id_sesion:
+                    sesion = conexion.execute(
+                        "SELECT * FROM sesiones_locales WHERE id_sesion = ?", (id_sesion,)
+                    ).fetchone()
+                else:
+                    sesion = conexion.execute(
+                        """
+                        SELECT * FROM sesiones_locales
+                        WHERE laptop_id = ? AND matricula = ?
+                        ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
+                        """,
+                        (laptop_id, str(matricula).strip()),
+                    ).fetchone()
+                if (
+                    not sesion
+                    or sesion["matricula"] != str(matricula).strip()
+                    or sesion["laptop_id"] != laptop_id
+                ):
                     raise RuntimeError("No existe una sesión local activa para esta laptop")
                 if sesion["hora_salida"]:
                     if sesion["devolucion_evento_id"]:
@@ -557,33 +572,45 @@ class ContingenciaLocal:
                 conexion.rollback()
                 raise
 
-    def registrar_devolucion_online(self, matricula, laptop_id, hora_salida):
+    def registrar_devolucion_online(self, matricula, laptop_id, hora_salida,
+                                    id_sesion=None):
         """Refleja una devolución ya confirmada por Sheets sin crear evento local."""
         with self._conexion() as conexion:
-            conexion.execute(
-                """
-                UPDATE sesiones_locales
-                SET hora_salida = COALESCE(hora_salida, ?), fecha_actualizacion = ?
-                WHERE laptop_id = ? AND matricula = ? AND hora_salida IS NULL
-                """,
-                (hora_salida, self._ahora(), laptop_id, str(matricula).strip()),
-            )
+            if id_sesion:
+                conexion.execute(
+                    """
+                    UPDATE sesiones_locales
+                    SET hora_salida = COALESCE(hora_salida, ?), fecha_actualizacion = ?
+                    WHERE id_sesion = ? AND laptop_id = ? AND matricula = ?
+                      AND hora_salida IS NULL
+                    """,
+                    (hora_salida, self._ahora(), id_sesion, laptop_id, str(matricula).strip()),
+                )
+            else:
+                conexion.execute(
+                    """
+                    UPDATE sesiones_locales
+                    SET hora_salida = COALESCE(hora_salida, ?), fecha_actualizacion = ?
+                    WHERE laptop_id = ? AND matricula = ? AND hora_salida IS NULL
+                    """,
+                    (hora_salida, self._ahora(), laptop_id, str(matricula).strip()),
+                )
         return self.obtener_sesion_activa(laptop_id)
 
     def registrar_no_entrega_local(self, matricula, laptop_id, fecha_evento,
-                                   hora_evento, equipo=None):
+                                   hora_evento, equipo=None, id_sesion=None):
         """Genera un NO_ENTREGA a lo sumo una vez por sesión local."""
         return self._cerrar_sesion_local(
             matricula, laptop_id, fecha_evento, hora_evento, equipo,
-            "no_entrega_evento_id", "NO_ENTREGA", "NO_ENTREGA_CONTADA",
+            "no_entrega_evento_id", "NO_ENTREGA", "NO_ENTREGA_CONTADA", id_sesion,
         )
 
     def registrar_cierre_automatico_local(self, matricula, laptop_id, fecha_evento,
-                                          hora_evento, equipo=None):
+                                          hora_evento, equipo=None, id_sesion=None):
         return self._cerrar_sesion_local(
             matricula, laptop_id, fecha_evento, hora_evento, equipo,
             "cierre_automatico_evento_id", "CIERRE_AUTOMATICO",
-            "CIERRE_AUTOMATICO_POR_NUEVA_SESION",
+            "CIERRE_AUTOMATICO_POR_NUEVA_SESION", id_sesion,
         )
 
     def resolver_sesion_activa_por_nueva_matricula(
@@ -604,27 +631,39 @@ class ContingenciaLocal:
         matricula_anterior = sesion["matricula"]
         if registrar_no_entrega:
             self.registrar_no_entrega_local(
-                matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo
+                matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo,
+                id_sesion=sesion["id_sesion"],
             )
         cerrada = self.registrar_cierre_automatico_local(
-            matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo
+            matricula_anterior, laptop_id, fecha_evento, hora_evento, equipo,
+            id_sesion=sesion["id_sesion"],
         )
         return {"resultado": "SESION_ANTERIOR_CERRADA", "sesion": cerrada}
 
     def _cerrar_sesion_local(self, matricula, laptop_id, fecha_evento, hora_evento,
-                              equipo, columna_evento, tipo_evento, observacion):
+                              equipo, columna_evento, tipo_evento, observacion,
+                              id_sesion=None):
         with self._conexion() as conexion:
             conexion.execute("BEGIN IMMEDIATE")
             try:
-                sesion = conexion.execute(
-                    """
-                    SELECT * FROM sesiones_locales
-                    WHERE laptop_id = ? AND matricula = ?
-                    ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
-                    """,
-                    (laptop_id, str(matricula).strip()),
-                ).fetchone()
-                if not sesion or sesion["matricula"] != str(matricula).strip():
+                if id_sesion:
+                    sesion = conexion.execute(
+                        "SELECT * FROM sesiones_locales WHERE id_sesion = ?", (id_sesion,)
+                    ).fetchone()
+                else:
+                    sesion = conexion.execute(
+                        """
+                        SELECT * FROM sesiones_locales
+                        WHERE laptop_id = ? AND matricula = ?
+                        ORDER BY fecha_creacion DESC, id_sesion DESC LIMIT 1
+                        """,
+                        (laptop_id, str(matricula).strip()),
+                    ).fetchone()
+                if (
+                    not sesion
+                    or sesion["matricula"] != str(matricula).strip()
+                    or sesion["laptop_id"] != laptop_id
+                ):
                     raise RuntimeError("No existe una sesión local para cerrar")
                 id_evento = sesion[columna_evento]
                 if id_evento:

@@ -56,6 +56,17 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("def mostrar_ventana_entrega(nombre, matricula):", self.fuente)
         self.assertIn('text="ENTREGAR Y APAGAR"', self.fuente)
 
+    def test_cierres_y_devolucion_dejan_trazas_con_id_sesion(self):
+        for evento in (
+            "SESION_LOCAL_CIERRE_SOLICITADO ",
+            "SESION_LOCAL_CERRADA id_sesion=",
+            "SESION_LOCAL_CIERRE_IGNORADO ",
+            "SESION_ACTIVA_CONSULTADA id_sesion=",
+        ):
+            self.assertIn(evento, self.fuente)
+        self.assertIn("tipo_evento=DEVOLUCION", self.fuente)
+        self.assertIn('id_sesion=sesion_previa["id_sesion"]', self.fuente)
+
 
 if __name__ == "__main__":
     unittest.main()
