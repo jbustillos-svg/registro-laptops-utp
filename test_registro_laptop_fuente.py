@@ -100,6 +100,14 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         # NO_ENTREGA y CIERRE_AUTOMATICO comparten el mismo despachador de cola.
         self.assertIn('for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):', self.fuente)
 
+        inmediata = self.fuente.split("def sincronizar_evento_inmediato", 1)[1].split(
+            "def crear_y_enviar_evento_critico", 1
+        )[0]
+        self.assertIn("SincronizadorContingencia", inmediata)
+        self.assertIn(".sincronizar_evento(id_evento, timeout=timeout)", inmediata)
+        self.assertIn("ESPERA_LOCK_SINCRONIZACION_INMEDIATA", inmediata)
+        self.assertNotIn("enviar_evento_coordinador(", inmediata)
+
     def test_devolucion_durable_solicita_cola_sin_esperar_post(self):
         salida = self.fuente.split("def registrar_salida_con_reintentos(", 1)[1].split(
             "def mostrar_ventana_espera_registro", 1
@@ -121,10 +129,23 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         previa = self.fuente.split("def sincronizar_devolucion_pre_apagado(id_evento):", 1)[1].split(
             "def iniciar_sincronizacion_pendientes", 1
         )[0]
-        self.assertIn("sincronizacion_lock.acquire(blocking=False)", previa)
-        self.assertIn(".sincronizar_evento(id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO)", previa)
+        self.assertIn("sincronizar_evento_inmediato(", previa)
+        self.assertIn("timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO", previa)
         self.assertIn("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_APLICADA", previa)
         self.assertIn("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_PENDIENTE", previa)
+
+    def test_modo_prueba_simula_apagado_sin_llamar_shutdown(self):
+        apagado = self.fuente.split("def apagar_windows():", 1)[1].split(
+            "def contar_usos_alumno", 1
+        )[0]
+        rama_prueba = apagado.split("if MODO_PRUEBA:", 1)[1].split(
+            'os.system("shutdown /s /t 3")', 1
+        )[0]
+        self.assertIn('APAGADO_SIMULADO modo_prueba=True', rama_prueba)
+        self.assertIn("crear_pantalla_login()", rama_prueba)
+        self.assertNotIn('os.system("shutdown /s /t 3")', rama_prueba)
+        self.assertIn('MODO_PRUEBA = False', self.fuente)
+        self.assertIn('os.system("shutdown /s /t 3")', apagado)
 
     def test_entrega_guarda_antes_de_sincronizar_y_apagar_sin_doble_worker(self):
         espera = self.fuente.split("def mostrar_ventana_espera_registro(", 1)[1].split(
@@ -145,6 +166,23 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("if exito:", espera)
         self.assertIn("if not sesion:\n            return False", espera)
         self.assertIn("state=\"disabled\"", self.fuente)
+
+    def test_prestamo_online_espera_un_intento_acotado_fuera_de_tk(self):
+        prestamo = self.fuente.split("def registrar_entrada(matricula):", 1)[1].split(
+            "def _existe_entrada_del_mismo_intento", 1
+        )[0]
+        self.assertIn("registrar_prestamo_coordinador(", prestamo)
+        self.assertIn("sincronizar_evento_inmediato(id_evento)", prestamo)
+        self.assertNotIn("enviar_evento_coordinador(", prestamo)
+        self.assertIn("threading.Thread(target=registrar_prestamo, daemon=True).start()", self.fuente)
+
+    def test_matricula_del_entry_no_se_convierte_a_numero(self):
+        inicio = self.fuente.split("def iniciar_sesion():", 1)[1].split(
+            "def mostrar_pantalla_espera", 1
+        )[0]
+        self.assertIn("matricula = entrada.get().strip()", inicio)
+        self.assertNotIn("int(matricula)", self.fuente)
+        self.assertNotIn("zfill(", self.fuente)
 
     def _funciones_ast(self, *nombres):
         arbol = ast.parse(self.fuente.lstrip("\ufeff"))

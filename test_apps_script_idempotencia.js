@@ -228,5 +228,27 @@ assert.equal(caso.registros.filas[1][4], (16 * 3600 + 10 * 60 + 11) / 86400);
 caso.registros.filas[1][4] = new Date('1970-01-01T16:10:11Z');
 assert.equal(caso.aplicar(devolucionDiana), 'Registros!2');
 assert.equal(caso.registros.filas[1][4].toISOString(), '1970-01-01T16:10:11.000Z');
+// Las fechas de Sheets también pueden llegar como seriales, no sólo Date/texto.
+assert.equal(caso.contexto.normalizarFecha_(
+  Math.floor(Date.UTC(2026, 9, 19) / 86400000) + 25569
+), '2026-10-19');
+
+// 16: si una devoluciÃ³n alcanzÃ³ Registros pero el evento quedÃ³ ERROR, el
+// reintento del mismo UUID se reconcilia como APLICADO, no sigue en ERROR.
+caso.registros.filas[1][4] = '16:10:11';
+let actualizacionDevolucion = null;
+caso.contexto.LockService = {getScriptLock: () => ({tryLock: () => true, hasLock: () => true, releaseLock: () => {}})};
+caso.contexto.leerSolicitud_ = () => devolucionDiana;
+caso.contexto.claveValida_ = () => true;
+caso.contexto.asegurarHojaEventos_ = () => ({});
+caso.contexto.buscarEvento_ = () => ({estado: 'ERROR', fila: 2, valores: []});
+caso.contexto.eventoGuardado_ = () => devolucionDiana;
+caso.contexto.actualizarEvento_ = (_hoja, _fila, estado, referencia) => {
+  actualizacionDevolucion = {estado, referencia};
+};
+caso.contexto.responder_ = (respuesta) => respuesta;
+const reconciliadaDevolucion = caso.contexto.doPost({});
+assert.equal(reconciliadaDevolucion.estado, 'APLICADO');
+assert.deepEqual(actualizacionDevolucion, {estado: 'APLICADO', referencia: 'Registros!2'});
 
 console.log('Pruebas de idempotencia Apps Script: OK');

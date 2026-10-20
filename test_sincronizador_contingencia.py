@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
@@ -224,6 +225,50 @@ class PruebasClienteCoordinador(unittest.TestCase):
                 self.assertEqual(
                     self.almacen.obtener_evento(entrega["devolucion_evento_id"])["sincronizado"], 0
                 )
+
+    def test_flujo_durable_preserva_matricula_y_hora_de_diana_de_extremo_python(self):
+        """SQLite y payload conservan el identificador literal antes del Apps Script."""
+        matricula = "0824118047"
+        nombre = "Diana Chaparro Leyva"
+        laptop = "AulaMovil24-B"
+        sesion = self.almacen.registrar_prestamo_coordinador(
+            matricula, nombre, laptop, "2026-10-19", "14:05:45"
+        )
+        prestamo = self.almacen.obtener_evento(sesion["prestamo_evento_id"])
+        self.assertEqual(sesion["matricula"], matricula)
+        self.assertEqual(prestamo["matricula"], matricula)
+        self.assertEqual(
+            SincronizadorContingencia._payload(prestamo, CONFIG)["matricula"], matricula
+        )
+        self.assertTrue(
+            SincronizadorContingencia(
+                self.almacen, CONFIG, self.logs.append,
+                post=lambda *_a, **_k: RespuestaFalsa(
+                    {"estado": "APLICADO", "referencia_registro": "Registros!9"}
+                ),
+            ).sincronizar_evento(sesion["prestamo_evento_id"])
+        )
+
+        entrega = self.almacen.registrar_devolucion_offline(
+            matricula, laptop, "2026-10-19", "14:06:23", id_sesion=sesion["id_sesion"]
+        )
+        devolucion = self.almacen.obtener_evento(entrega["devolucion_evento_id"])
+        datos = json.loads(devolucion["datos_json"])
+        self.assertEqual((devolucion["matricula"], datos["hora_salida"]), (matricula, "14:06:23"))
+        self.assertEqual(datos["prestamo_evento_id"], sesion["prestamo_evento_id"])
+        enviado = []
+        self.assertTrue(
+            SincronizadorContingencia(
+                self.almacen, CONFIG, self.logs.append,
+                post=lambda _url, json, timeout, **_k: (
+                    enviado.append(json)
+                    or RespuestaFalsa({"estado": "APLICADO", "referencia_registro": "Registros!9"})
+                ),
+            ).sincronizar_evento(entrega["devolucion_evento_id"]),
+            self.logs,
+        )
+        self.assertEqual(enviado[0]["matricula"], matricula)
+        self.assertEqual(enviado[0]["datos"]["hora_salida"], "14:06:23")
 
     def test_html_con_http_200_conserva_detalle_tecnico_sin_clave(self):
         evento = self.almacen.obtener_evento(self.evento)

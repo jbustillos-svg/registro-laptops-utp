@@ -95,6 +95,8 @@ diagnostico_conectividad = {
 
 TIEMPO_INACTIVIDAD_MS = 60000
 TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)
+TIMEOUT_SINCRONIZACION_INMEDIATA = (2, 3)
+ESPERA_LOCK_SINCRONIZACION_INMEDIATA = 0.25
 timeout_inactividad_id = None
 timeout_inactividad_activo = False
 flujo_cancelado_por_inactividad = False
@@ -206,6 +208,55 @@ def enviar_evento_local_inmediato(id_evento):
     # La solicitud puede omitirse porque un worker ya procesa la misma cola.
     # El evento sigue durable y pendiente hasta que el sincronizador lo confirme.
     return True
+
+
+def sincronizar_evento_inmediato(id_evento, timeout=TIMEOUT_SINCRONIZACION_INMEDIATA):
+    """Intenta una vez el UUID durable mediante el sincronizador existente.
+
+    Debe invocarse desde un worker. La cola y el ciclo de 45 segundos siguen
+    siendo el respaldo si no hay red, el coordinador falla o ya hay un ciclo
+    procesando la misma base local.
+    """
+    if almacen_contingencia is None:
+        return False
+    try:
+        evento = almacen_contingencia.obtener_evento(id_evento)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+        )
+        return False
+    if not evento or evento.get("sincronizado"):
+        return bool(evento and evento.get("sincronizado"))
+
+    registrar_evento_tecnico(
+        f"SINCRONIZACION_INMEDIATA_SOLICITADA tipo={evento['tipo_evento']}"
+    )
+    if not sincronizacion_lock.acquire(
+        timeout=ESPERA_LOCK_SINCRONIZACION_INMEDIATA
+    ):
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion"
+        )
+        return False
+    try:
+        registrar_evento_tecnico("SINCRONIZACION_INMEDIATA_INICIADA")
+        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+        aplicada = SincronizadorContingencia(
+            almacen_contingencia, configuracion, registrar_evento_tecnico
+        ).sincronizar_evento(id_evento, timeout=timeout)
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_APLICADA"
+            if aplicada else "SINCRONIZACION_INMEDIATA_PENDIENTE"
+        )
+        return aplicada
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+        )
+        return False
+    finally:
+        sincronizacion_lock.release()
 
 
 def crear_y_enviar_evento_critico(tipo, matricula, nombre, fecha, hora, laptop_id,
@@ -442,27 +493,11 @@ def sincronizar_devolucion_pre_apagado(id_evento):
     """
     if almacen_contingencia is None:
         return False
-    try:
-        evento = almacen_contingencia.obtener_evento(id_evento)
-    except Exception as error:
-        registrar_evento_tecnico(
-            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_ERROR="
-            f"{type(error).__name__}"
-        )
-        return False
-    if not evento or evento.get("tipo_evento") != "DEVOLUCION":
-        return False
     registrar_evento_tecnico("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_INICIADA")
-    if not sincronizacion_lock.acquire(blocking=False):
-        registrar_evento_tecnico(
-            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_OMITIDA motivo=ya_en_ejecucion"
-        )
-        return False
     try:
-        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
-        aplicada = SincronizadorContingencia(
-            almacen_contingencia, configuracion, registrar_evento_tecnico
-        ).sincronizar_evento(id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO)
+        aplicada = sincronizar_evento_inmediato(
+            id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO
+        )
         registrar_evento_tecnico(
             "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_APLICADA"
             if aplicada else "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_PENDIENTE"
@@ -474,8 +509,6 @@ def sincronizar_devolucion_pre_apagado(id_evento):
             f"{type(error).__name__}"
         )
         return False
-    finally:
-        sincronizacion_lock.release()
 
 
 def iniciar_sincronizacion_pendientes():
@@ -1249,7 +1282,7 @@ def abrir_acceso_administrativo(
     dialogo.attributes("-topmost", True)
     dialogo.withdraw()
 
-    contenido = tk.Frame(dialogo, bg=COLOR_TARJETA, padx=30, pady=24)
+    contenido = tk.Frame(dialogo, bg=COLOR_TARJETA, padx=22, pady=18)
     contenido.pack(fill=tk.BOTH, expand=True)
 
     tk.Label(
@@ -1265,7 +1298,8 @@ def abrir_acceso_administrativo(
         text=mensaje,
         font=FUENTE_CUERPO,
         fg=COLOR_TEXTO_SECUNDARIO,
-        bg=COLOR_TARJETA
+        bg=COLOR_TARJETA,
+        wraplength=460
     )
     mensaje_label.pack(pady=(0, 14))
 
@@ -1284,10 +1318,10 @@ def abrir_acceso_administrativo(
         show="*",
         justify=tk.CENTER,
         bd=0,
-        width=28,
+        width=24,
         **estilo_entrada()
     )
-    entrada_clave.pack(fill=tk.X, ipady=9, pady=(6, 0))
+    entrada_clave.pack(anchor="w", ipady=8, pady=(5, 0))
 
     estado_intentos = tk.Label(
         contenido,
@@ -1299,7 +1333,7 @@ def abrir_acceso_administrativo(
     estado_intentos.pack(pady=(8, 0))
 
     botones = tk.Frame(contenido, bg=COLOR_TARJETA)
-    botones.pack(fill=tk.X, pady=(18, 0))
+    botones.pack(fill=tk.X, pady=(14, 0))
     intentos_incorrectos = {"cantidad": 0}
 
     def cerrar(motivo="CANCELADO", restaurar=True):
@@ -1349,17 +1383,17 @@ def abrir_acceso_administrativo(
     tk.Button(
         botones,
         text="CANCELAR",
-        padx=20,
-        pady=8,
+        padx=16,
+        pady=7,
         command=cerrar,
         **estilo_boton("secundario")
-    ).pack(side=tk.RIGHT, padx=(12, 0))
+    ).pack(side=tk.RIGHT, padx=(10, 0))
 
     tk.Button(
         botones,
         text=texto_boton,
-        padx=20,
-        pady=8,
+        padx=16,
+        pady=7,
         command=autenticar,
         **estilo_boton(tipo_boton)
     ).pack(side=tk.RIGHT)
@@ -1373,7 +1407,7 @@ def abrir_acceso_administrativo(
     dialogo.bind("<Escape>", lambda _evento: cerrar("CANCELADO"))
     dialogo.bind("<Destroy>", al_destruir, add="+")
     vincular_dispatcher_administrativo(dialogo)
-    _centrar_dialogo(dialogo, parent, ancho_minimo=460, alto_minimo=285)
+    _centrar_dialogo(dialogo, parent, ancho_minimo=520, alto_minimo=260)
     dialogo.grab_set()
     entrada_clave.focus_force()
     registrar_evento_tecnico("ADMIN_DIALOGO_ABIERTO")
@@ -1829,12 +1863,15 @@ def apagar_windows():
         return
 
     if MODO_PRUEBA:
+        registrar_evento_tecnico("APAGADO_SIMULADO modo_prueba=True")
         mostrar_exito(
             "Modo de prueba",
             "La devolución terminó correctamente. En funcionamiento normal, "
             "la laptop se apagaría en este momento."
         )
-        cerrar_aplicacion()
+        # Reinicia sólo el flujo de la aplicación para poder ejecutar otra
+        # prueba; nunca cierra sesión de Windows ni toca el proceso del sistema.
+        crear_pantalla_login()
         return
 
     os.system("shutdown /s /t 3")
@@ -3087,7 +3124,10 @@ def registrar_entrada(matricula):
                         registrar_evento_tecnico(
                             f"PRESTAMO_LOCAL_EVENTO_CREADO id={id_evento} tipo=PRESTAMO"
                         )
-                    enviar_evento_local_inmediato(id_evento)
+                    # registrar_entrada ya corre fuera de Tk. Da al coordinador
+                    # una oportunidad breve antes de mostrar la entrega; si falla,
+                    # SQLite conserva exactamente el mismo UUID para la cola.
+                    sincronizar_evento_inmediato(id_evento)
                 else:
                     registrar_evento_tecnico(
                         "PRESTAMO_LOCAL_SESION_EXISTENTE evento=NO_APLICA"

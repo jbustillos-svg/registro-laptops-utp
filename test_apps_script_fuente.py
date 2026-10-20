@@ -53,6 +53,7 @@ class PruebasFuenteAppsScript(unittest.TestCase):
             "buscarRegistroPorSesion_",
             "horaSalidaCoincide_",
             "MATRICULA_CERO_INICIAL_RECUPERADA",
+            "Math.floor(valor) * 86400000",
         ):
             self.assertIn(simbolo, self.fuente)
         self.assertNotIn("parseInt(evento.matricula", self.fuente)

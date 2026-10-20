@@ -146,6 +146,9 @@ function asegurarHojaEventos_(libro) {
   if (existentes.join('|') !== CABECERAS_EVENTOS.join('|')) {
     hoja.getRange(1, 1, 1, CABECERAS_EVENTOS.length).setValues([CABECERAS_EVENTOS]);
   }
+  // La bitácora conserva la misma identidad literal que Registros; un reintento
+  // nunca debe reconstruir una matrícula numérica sin sus ceros iniciales.
+  hoja.getRange(1, 3, Math.max(hoja.getLastRow(), 1), 1).setNumberFormat('@');
   hoja.setFrozenRows(1);
   return hoja;
 }
@@ -426,6 +429,13 @@ function esFecha_(valor) {
 function normalizarFecha_(valor) {
   if (esFecha_(valor)) {
     return Utilities.formatDate(valor, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  // getValues() puede entregar una fecha de Sheets como serial. Se convierte
+  // sólo para comparar identidades; la celda original no se reescribe ni se
+  // convierte a texto.
+  if (typeof valor === 'number' && isFinite(valor) && valor > 0) {
+    const fechaSerial = new Date(Date.UTC(1899, 11, 30) + Math.floor(valor) * 86400000);
+    return Utilities.formatDate(fechaSerial, 'Etc/UTC', 'yyyy-MM-dd');
   }
   const texto = normalizarTexto_(valor);
   const coincidencia = texto.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
