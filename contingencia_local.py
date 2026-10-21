@@ -13,7 +13,7 @@ import sqlite3
 import uuid
 
 
-SCHEMA_VERSION_ACTUAL = 4
+SCHEMA_VERSION_ACTUAL = 5
 
 INTERNET_OK = "INTERNET_OK"
 INTERNET_ERROR = "INTERNET_ERROR"
@@ -89,6 +89,12 @@ class ContingenciaLocal:
                     self._migrar_a_v4(conexion)
                     conexion.execute(
                         "UPDATE schema_version SET version = 4 WHERE id = 1"
+                    )
+                    version = 4
+                if version < 5:
+                    self._migrar_a_v5(conexion)
+                    conexion.execute(
+                        "UPDATE schema_version SET version = 5 WHERE id = 1"
                     )
                 if version > SCHEMA_VERSION_ACTUAL:
                     raise RuntimeError(
@@ -210,6 +216,7 @@ class ContingenciaLocal:
             )
             """
         )
+
         columnas = {
             fila["name"] for fila in conexion.execute("PRAGMA table_info(eventos_pendientes)")
         }
@@ -240,12 +247,24 @@ class ContingenciaLocal:
             )
             """
         )
+
         conexion.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_eventos_pendientes_sincronizado
             ON eventos_pendientes (sincronizado, fecha_creacion)
             """
         )
+
+    @staticmethod
+    def _migrar_a_v5(conexion):
+        """Añade el verificador mínimo de CURP sin exponer ni borrar datos."""
+        columnas = {
+            fila["name"] for fila in conexion.execute("PRAGMA table_info(personas_cache)")
+        }
+        if "curp_ultimos_2" not in columnas:
+            conexion.execute(
+                "ALTER TABLE personas_cache ADD COLUMN curp_ultimos_2 TEXT"
+            )
 
     def version_esquema(self):
         with self._conexion() as conexion:
@@ -718,7 +737,9 @@ class ContingenciaLocal:
             filas = conexion.execute(
                 """
                 SELECT * FROM eventos_pendientes
-                WHERE sincronizado = 0 ORDER BY fecha_creacion, id_evento
+                WHERE sincronizado = 0
+                ORDER BY CASE WHEN intentos = 0 THEN 0 ELSE 1 END,
+                         fecha_creacion, id_evento
                 """
             ).fetchall()
         return [dict(fila) for fila in filas]

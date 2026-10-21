@@ -204,7 +204,7 @@ def enviar_evento_local_inmediato(id_evento):
     evento = almacen_contingencia.obtener_evento(id_evento)
     if not evento:
         return False
-    solicitar_sincronizacion_inmediata(evento["tipo_evento"])
+    solicitar_sincronizacion_inmediata(evento["tipo_evento"], id_evento=id_evento)
     # La solicitud puede omitirse porque un worker ya procesa la misma cola.
     # El evento sigue durable y pendiente hasta que el sincronizador lo confirme.
     return True
@@ -463,8 +463,8 @@ def sincronizar_pendientes_en_segundo_plano():
         sincronizacion_lock.release()
 
 
-def solicitar_sincronizacion_inmediata(tipo_evento):
-    """Solicita un único worker daemon para la cola durable ya persistida."""
+def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):
+    """Da prioridad al UUID nuevo sin abrir un segundo coordinador ni POST paralelo."""
     registrar_evento_tecnico(
         f"SINCRONIZACION_INMEDIATA_SOLICITADA tipo={tipo_evento}"
     )
@@ -477,7 +477,14 @@ def solicitar_sincronizacion_inmediata(tipo_evento):
     def sincronizar():
         try:
             registrar_evento_tecnico("SINCRONIZACION_INMEDIATA_INICIADA")
-            _sincronizar_pendientes_con_lock_adquirido()
+            configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+            sincronizador = SincronizadorContingencia(
+                almacen_contingencia, configuracion, registrar_evento_tecnico
+            )
+            if id_evento:
+                sincronizador.sincronizar_evento(id_evento)
+            else:
+                sincronizador.sincronizar()
         finally:
             sincronizacion_lock.release()
 
@@ -3423,7 +3430,12 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 "Por favor, espera.",
                 "Procesando..."
             )
-            threading.Thread(target=comprobar_devolucion, daemon=True).start()
+            # La devolución no consulta Sheets antes de quedar durable: esta ruta
+            # toma la sesión SQLite exacta, crea el UUID y la cierra primero.
+            mostrar_ventana_espera_registro(
+                ventana, matricula, nombre, modal_progreso,
+                modo_contingencia=True
+            )
 
         def comprobar_devolucion():
             def notificar_intento(intento, total):
@@ -3577,8 +3589,12 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
         threading.Thread(target=comprobar_proximidad, daemon=True).start()
         print("[DEVOLUCION] worker iniciado")
     else:
-        print("[DEVOLUCION] proximidad deshabilitada; verificando devolución")
-        threading.Thread(target=comprobar_devolucion, daemon=True).start()
+        print("[DEVOLUCION] proximidad deshabilitada; guardando devolución local")
+        ventana.after_idle(
+            lambda: procesar_resultado_proximidad(
+                proximidad_valida=True, estado_proximidad=None
+            )
+        )
     return
 
 
@@ -3937,6 +3953,15 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             registrar_evento_tecnico(
                 f"IDENTIDAD matricula={matricula} rol={rol} CURP_ALUMNO_VACIA"
             )
+            if modo_contingencia:
+                mostrar_error(
+                    "Validación offline no disponible",
+                    "Esta matrícula está en la caché local, pero todavía no tiene "
+                    "el verificador de identidad guardado.\n\n"
+                    "Conéctate a Internet una vez para actualizarla."
+                )
+                cancelar_validacion_curp()
+                return
             mostrar_error(
                 "Error",
                 "No se pudo validar la identidad.\nContacta al administrador."

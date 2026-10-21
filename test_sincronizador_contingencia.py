@@ -86,6 +86,30 @@ class PruebasClienteCoordinador(unittest.TestCase):
         self.assertEqual(cliente.sincronizar(), 1)
         self.assertEqual(self.almacen.obtener_eventos_pendientes(), [])
 
+    def test_evento_nuevo_no_es_bloqueado_por_error_historico(self):
+        self.almacen.marcar_sincronizado(self.evento)
+        viejo = self.almacen.crear_evento(
+            "LAP-0", "NO_ENTREGA", "A0", "Anterior", "2026-10-01", "08:00:00",
+            "LAP-0", {}, id_evento="viejo-error", fecha_creacion="2026-10-01T08:00:00"
+        )
+        self.almacen.incrementar_intentos(viejo, "DEPENDENCIA_PRESTAMO_NO_ENCONTRADA")
+        nuevo = self.almacen.crear_evento(
+            "LAP-1", "DEVOLUCION", "A1", "Ana", "2026-10-21", "10:00:00",
+            "LAP-1", {}, id_evento="nuevo-actual", fecha_creacion="2026-10-21T10:00:00"
+        )
+        enviados = []
+        cliente = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: (
+                enviados.append(json["id_evento"])
+                or RespuestaFalsa({"estado": "APLICADO"})
+            ),
+        )
+
+        self.assertEqual(cliente.sincronizar(), 2)
+        self.assertEqual(enviados[0], nuevo)
+        self.assertEqual(self.almacen.obtener_evento(nuevo)["sincronizado"], 1)
+
     def test_sin_configuracion_no_intenta_post_y_deja_pendiente(self):
         llamadas = []
         cliente = SincronizadorContingencia(

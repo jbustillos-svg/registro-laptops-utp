@@ -58,6 +58,19 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("def mostrar_ventana_entrega(nombre, matricula):", self.fuente)
         self.assertIn('text="ENTREGAR Y APAGAR"', self.fuente)
 
+    def test_identidad_offline_exige_el_verificador_curp_minimo_cacheado(self):
+        consulta = self.fuente.split("def consultar_datos_identidad", 1)[1].split(
+            "def buscar_curp", 1
+        )[0]
+        flujo_identidad = self.fuente.split("def mostrar_confirmacion_simple", 1)[1].split(
+            "def formatear_fecha", 1
+        )[0]
+        self.assertIn("curp_ultimos_2 = str(curp).strip()[-2:]", consulta)
+        self.assertIn("actualizar_cache_persona(", consulta)
+        self.assertIn('persona_cache.get("curp_ultimos_2")', flujo_identidad)
+        self.assertIn("Validación offline no disponible", flujo_identidad)
+        self.assertNotIn("curp_real = persona_cache.get(\"curp\")", flujo_identidad)
+
     def test_cierres_y_devolucion_dejan_trazas_con_id_sesion(self):
         for evento in (
             "SESION_LOCAL_CIERRE_SOLICITADO ",
@@ -70,7 +83,7 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn('id_sesion=sesion_previa["id_sesion"]', self.fuente)
 
     def test_eventos_durables_solicitan_sincronizacion_inmediata_sin_post_en_ui(self):
-        self.assertIn("def solicitar_sincronizacion_inmediata(tipo_evento):", self.fuente)
+        self.assertIn("def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):", self.fuente)
         for traza in (
             "SINCRONIZACION_INMEDIATA_SOLICITADA tipo=",
             "SINCRONIZACION_INMEDIATA_INICIADA",
@@ -79,10 +92,11 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
             self.assertIn(traza, self.fuente)
 
         solicitud = self.fuente.split(
-            "def solicitar_sincronizacion_inmediata(tipo_evento):", 1
+            "def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):", 1
         )[1].split("def iniciar_sincronizacion_pendientes", 1)[0]
         self.assertIn("sincronizacion_lock.acquire(blocking=False)", solicitud)
         self.assertIn("threading.Thread(target=sincronizar, daemon=True).start()", solicitud)
+        self.assertIn("sincronizador.sincronizar_evento(id_evento)", solicitud)
         self.assertLess(
             solicitud.index("sincronizacion_lock.acquire(blocking=False)"),
             solicitud.index("threading.Thread(target=sincronizar, daemon=True).start()"),
@@ -91,7 +105,7 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         envio = self.fuente.split("def enviar_evento_local_inmediato(id_evento):", 1)[1].split(
             "def crear_y_enviar_evento_critico", 1
         )[0]
-        self.assertIn('solicitar_sincronizacion_inmediata(evento["tipo_evento"])', envio)
+        self.assertIn('solicitar_sincronizacion_inmediata(evento["tipo_evento"], id_evento=id_evento)', envio)
         self.assertNotIn("enviar_evento_coordinador(", envio)
 
         # PRESTAMO y DEVOLUCION despiertan la cola después de persistir SQLite.
@@ -566,7 +580,14 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertEqual(self.fuente.count("procesar_resultado_proximidad(True, None)"), 1)
         self.assertEqual(self.fuente.count("procesar_proximidad(True, None)"), 1)
         self.assertIn("mostrar_confirmacion_simple(", self.fuente)
-        self.assertIn("threading.Thread(target=comprobar_devolucion, daemon=True).start()", self.fuente)
+        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        ruta_durable = entrega.split('if boton:\n                boton.config(text="Verificando conexión...")', 1)[1].split(
+            "def comprobar_devolucion", 1
+        )[0]
+        self.assertIn("mostrar_ventana_espera_registro(", ruta_durable)
+        self.assertNotIn("verificar_sheets_con_reintentos", ruta_durable)
         solicitud = self.fuente.split("def _solicitar_contingencia_proximidad", 1)[1].split(
             "def _solicitar_salida_administrativa", 1
         )[0]

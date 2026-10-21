@@ -285,6 +285,9 @@ class SincronizadorContingencia:
                             f"id={evento['id_evento']} tipo={evento['tipo_evento']} "
                             f"{diagnostico_error_coordinador(error)}"
                         )
+                        # No monopolizar el bloqueo con una cola histórica en
+                        # error: el siguiente ciclo recuperará ese UUID.
+                        break
         finally:
             self._lock.release()
         return realizados

@@ -67,6 +67,29 @@ class PruebasContingenciaLocal(unittest.TestCase):
         self.assertEqual(self.almacen.version_esquema(), SCHEMA_VERSION_ACTUAL)
         self.assertIsNotNone(self.almacen.obtener_evento("pendiente-v1"))
 
+    def test_migracion_agrega_verificador_curp_sin_borrar_cache(self):
+        conexion = sqlite3.connect(self.almacen.ruta_db)
+        conexion.executescript(
+            """
+            CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES (1, 4);
+            CREATE TABLE personas_cache (
+                matricula TEXT PRIMARY KEY, nombre TEXT NOT NULL DEFAULT '',
+                rol TEXT NOT NULL DEFAULT 'ALUMNO', estado TEXT, no_entregas INTEGER,
+                grupo TEXT, carrera TEXT, fecha_actualizacion TEXT NOT NULL
+            );
+            INSERT INTO personas_cache VALUES
+                ('A1', 'Ana', 'ALUMNO', 'ACTIVO', 0, NULL, NULL, '2026-10-21T00:00:00');
+            """
+        )
+        conexion.commit()
+        conexion.close()
+
+        self.almacen.inicializar()
+        persona = self.almacen.obtener_persona("A1")
+        self.assertEqual(persona["nombre"], "Ana")
+        self.assertIsNone(persona["curp_ultimos_2"])
+
     def test_upsert_y_lectura_de_persona(self):
         self.almacen.inicializar()
         self.almacen.upsert_persona("A1", "Ana", "ALUMNO", "XY", "ACTIVO", 1)
