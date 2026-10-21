@@ -2605,7 +2605,10 @@ def verificar_conexion_periodicamente():
         else:
             cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
         
-        time.sleep(2)
+        # Una lectura de Sheets cada dos segundos agota rápidamente la cuota y
+        # alterna falsos SHEETS_API_ERROR/429. La cola inmediata cubre eventos
+        # nuevos; esta verificación sólo es salud de respaldo.
+        time.sleep(60)
 
 def detener_verificacion_conexion():
     global verificar_conexion_activo

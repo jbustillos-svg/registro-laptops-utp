@@ -138,6 +138,14 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("ventana.after(15000, sincronizar_pendientes_periodicamente)", self.fuente)
         self.assertIn("ventana.after(45000, sincronizar_pendientes_periodicamente)", self.fuente)
 
+    def test_sondeo_de_salud_de_sheets_no_agota_la_cuota(self):
+        """La cola inmediata atiende eventos nuevos; este sondeo sólo es respaldo."""
+        sondeo = self.fuente.split("def verificar_conexion_periodicamente():", 1)[1].split(
+            "def detener_verificacion_conexion", 1
+        )[0]
+        self.assertIn("time.sleep(60)", sondeo)
+        self.assertNotIn("time.sleep(2)", sondeo)
+
     def test_devolucion_pre_apagado_usa_un_intento_breve_del_sincronizador_actual(self):
         self.assertIn("TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)", self.fuente)
         previa = self.fuente.split("def sincronizar_devolucion_pre_apagado(id_evento):", 1)[1].split(
