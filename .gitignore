@@ -5,6 +5,7 @@ ENTORNO.txt
 .requirements.sha256
 .actualizacion_pendiente
 .actualizacion.lock
+canal_actualizacion.json
 __pycache__/
 *.log
 *.exe
