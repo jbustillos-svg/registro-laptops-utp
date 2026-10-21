@@ -67,6 +67,9 @@ class PruebasActualizacion(unittest.TestCase):
             ),
             mock.patch.object(bootstrap, "RUTA_LOG", self.laptop / "bootstrap.log"),
             mock.patch.object(bootstrap, "RUTA_LOG_ARRANQUE", self.laptop / "arranque.log"),
+            mock.patch.object(
+                bootstrap, "RUTA_CANAL_ACTUALIZACION", self.laptop / "canal_actualizacion.json"
+            ),
             mock.patch.object(bootstrap, "red_disponible", return_value=True),
         ]
         for parche in self.parches:
@@ -85,6 +88,82 @@ class PruebasActualizacion(unittest.TestCase):
     def _marcar(self):
         bootstrap.RUTA_ACTUALIZACION_PENDIENTE.write_text(
             "pendiente\n", encoding="ascii"
+        )
+
+    def _escribir_canal(self, contenido):
+        bootstrap.RUTA_CANAL_ACTUALIZACION.write_text(contenido, encoding="utf-8")
+
+    def test_canal_inexistente_usa_main(self):
+        self.assertEqual(bootstrap.rama_actualizacion(), "main")
+
+    def test_canal_piloto_usa_solo_la_rama_permitida(self):
+        self._escribir_canal('{"rama": "desarrollo-contingencia-v1.4.7"}')
+        self.assertEqual(
+            bootstrap.rama_actualizacion(), "desarrollo-contingencia-v1.4.7"
+        )
+
+    def test_canal_corrupto_y_rama_no_permitida_vuelven_a_main(self):
+        self._escribir_canal("{no es json")
+        self.assertEqual(bootstrap.rama_actualizacion(), "main")
+        self._escribir_canal('{"rama": "origin/main; comando"}')
+        self.assertEqual(bootstrap.rama_actualizacion(), "main")
+
+    def test_transiciones_entre_canales_seleccionan_la_rama_exacta(self):
+        casos = (
+            (None, "main"),
+            ('{"rama": "desarrollo-contingencia-v1.4.7"}', "desarrollo-contingencia-v1.4.7"),
+            ('{"rama": "desarrollo-contingencia-v1.4.7"}', "desarrollo-contingencia-v1.4.7"),
+            (None, "main"),
+        )
+        for contenido, rama in casos:
+            bootstrap.RUTA_CANAL_ACTUALIZACION.unlink(missing_ok=True)
+            if contenido is not None:
+                self._escribir_canal(contenido)
+            respuestas = [
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "0\n", ""),
+            ]
+            with mock.patch.object(bootstrap, "ejecutar_git", side_effect=respuestas) as ejecutar:
+                self.assertTrue(bootstrap.comprobar_actualizacion_arranque(AvisoFalso()))
+            self.assertEqual(ejecutar.call_args_list[0].args[0][2], rama)
+
+    def test_comprobacion_piloto_hace_fetch_y_compara_exclusivamente_su_rama(self):
+        self._escribir_canal('{"rama": "desarrollo-contingencia-v1.4.7"}')
+        respuestas = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "0\n", ""),
+        ]
+        with mock.patch.object(bootstrap, "ejecutar_git", side_effect=respuestas) as ejecutar:
+            self.assertTrue(bootstrap.comprobar_actualizacion_arranque(AvisoFalso()))
+        comandos = [llamada.args[0] for llamada in ejecutar.call_args_list]
+        self.assertEqual(
+            comandos[0], ["fetch", "origin", "desarrollo-contingencia-v1.4.7", "--quiet"]
+        )
+        self.assertEqual(
+            comandos[1],
+            ["rev-list", "--count", "HEAD..origin/desarrollo-contingencia-v1.4.7"],
+        )
+
+    def test_aplicacion_piloto_coloca_exactamente_su_rama(self):
+        self._escribir_canal('{"rama": "desarrollo-contingencia-v1.4.7"}')
+        self._marcar()
+        respuestas = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+        with mock.patch.object(bootstrap, "ejecutar_git", side_effect=respuestas) as ejecutar:
+            self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
+        comandos = [llamada.args[0] for llamada in ejecutar.call_args_list]
+        self.assertEqual(
+            comandos[-2],
+            ["rev-parse", "--verify", "origin/desarrollo-contingencia-v1.4.7"],
+        )
+        self.assertEqual(
+            comandos[-1],
+            ["checkout", "-B", "canal-desarrollo-contingencia-v1-4-7",
+             "origin/desarrollo-contingencia-v1.4.7"],
         )
 
     def test_sin_marker_no_hace_operacion_remota(self):
@@ -138,13 +217,13 @@ class PruebasActualizacion(unittest.TestCase):
         self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
         self.assertEqual((self.laptop / "app.txt").read_text(), "cambio local\n")
 
-    def test_no_fast_forward_bloquea_y_conserva_marker(self):
+    def test_commit_local_no_tracked_no_impide_colocar_el_canal(self):
         (self.laptop / "local.txt").write_text("commit local\n", encoding="utf-8")
         git(self.laptop, "add", "local.txt")
         git(self.laptop, "commit", "-m", "rama local")
         self._marcar()
-        self.assertFalse(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
-        self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+        self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
+        self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
 
     def test_estado_legado_crea_marker(self):
         git(self.laptop, "fetch", "origin", "main")
@@ -212,7 +291,8 @@ class PruebasActualizacion(unittest.TestCase):
 
     def test_solo_bootstrap_contiene_merge(self):
         raiz = Path(__file__).parent
-        self.assertIn('"merge", "--ff-only"', (raiz / "bootstrap_laptop.pyw").read_text(encoding="utf-8"))
+        self.assertIn('"checkout", "-B"', (raiz / "bootstrap_laptop.pyw").read_text(encoding="utf-8"))
+        self.assertNotIn('"merge", "--ff-only"', (raiz / "bootstrap_laptop.pyw").read_text(encoding="utf-8"))
         self.assertNotIn('"merge"', (raiz / "actualizador_segundo_plano.pyw").read_text(encoding="utf-8"))
         self.assertNotIn('"merge"', (raiz / "registro_laptop.pyw").read_text(encoding="utf-8"))
 

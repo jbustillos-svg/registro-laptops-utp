@@ -28,10 +28,34 @@ RUTA_BLOQUEO_ACTUALIZACION = DIRECTORIO_APP / ".actualizacion.lock"
 RUTA_LOG = DIRECTORIO_APP / "bootstrap.log"
 RUTA_LOG_ARRANQUE = DIRECTORIO_APP / "arranque.log"
 RUTA_APLICACION = DIRECTORIO_APP / "registro_laptop.pyw"
+RUTA_CANAL_ACTUALIZACION = DIRECTORIO_APP / "canal_actualizacion.json"
+RAMAS_ACTUALIZACION_PERMITIDAS = frozenset(
+    ("main", "desarrollo-contingencia-v1.4.7")
+)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TIEMPO_ESPERA_APP_LISTA = 120
 TIMEOUT_FETCH_RAPIDO = 6
 INTENTOS_FETCH_RAPIDO = 2
+
+
+def rama_actualizacion():
+    """Lee el canal local con una lista cerrada; cualquier fallo vuelve a main."""
+    rama = "main"
+    try:
+        contenido = json.loads(RUTA_CANAL_ACTUALIZACION.read_text(encoding="utf-8"))
+        candidata = contenido.get("rama") if isinstance(contenido, dict) else None
+        if isinstance(candidata, str) and candidata.strip() in RAMAS_ACTUALIZACION_PERMITIDAS:
+            rama = candidata.strip()
+    except (OSError, UnicodeError, ValueError, TypeError):
+        pass
+    registrar(f"CANAL_ACTUALIZACION rama={rama}")
+    return rama
+
+
+def rama_local_canal(rama):
+    """Nombre local estable para cada canal; no mezcla historias entre ramas."""
+    sufijo = "main" if rama == "main" else "desarrollo-contingencia-v1-4-7"
+    return f"canal-{sufijo}"
 
 
 def registrar(mensaje):
@@ -353,15 +377,13 @@ def adoptar_actualizacion_legada():
     """Migra el origin/main ya descargado por las versiones 1.3.1/1.3.2."""
     if RUTA_ACTUALIZACION_PENDIENTE.exists():
         return
+    rama = rama_actualizacion()
+    referencia = f"origin/{rama}"
     try:
-        pendientes = ejecutar_git(["rev-list", "--count", "HEAD..origin/main"], 5)
-        avance = ejecutar_git(
-            ["merge-base", "--is-ancestor", "HEAD", "origin/main"], 5
-        )
+        pendientes = ejecutar_git(["rev-list", "--count", f"HEAD..{referencia}"], 5)
         if (
             pendientes.returncode == 0
             and int(pendientes.stdout.strip() or "0") > 0
-            and avance.returncode == 0
         ):
             crear_marker_actualizacion("estado legado")
             registrar("estado legado preparado convertido a actualización pendiente")
@@ -374,6 +396,9 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
     if not RUTA_ACTUALIZACION_PENDIENTE.exists():
         return True
 
+    rama = rama_actualizacion()
+    referencia = f"origin/{rama}"
+
     aviso.actualizar("Actualizando sistema...")
     registrar("actualización pendiente encontrada")
     try:
@@ -383,7 +408,7 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
                     esperar_red(aviso)
                     aviso.actualizar("Actualizando sistema...")
 
-                fetch = ejecutar_git(["fetch", "origin", "main", "--quiet"], 30)
+                fetch = ejecutar_git(["fetch", "origin", rama, "--quiet"], 30)
                 if fetch.returncode != 0:
                     registrar(
                         f"actualización pendiente: fetch falló: {detalle_resultado(fetch)}"
@@ -404,15 +429,16 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
                 return False
 
             avance = ejecutar_git(
-                ["merge-base", "--is-ancestor", "HEAD", "origin/main"], 10
+                ["rev-parse", "--verify", referencia], 10
             )
             if avance.returncode != 0:
-                registrar("actualización bloqueada: origin/main no permite fast-forward")
+                registrar(f"actualización bloqueada: {referencia} no permite fast-forward")
                 return False
 
-            merge = ejecutar_git(["merge", "--ff-only", "origin/main"], 30)
-            if merge.returncode != 0:
-                registrar(f"actualización pendiente: merge falló: {detalle_resultado(merge)}")
+            rama_local = rama_local_canal(rama)
+            colocar = ejecutar_git(["checkout", "-B", rama_local, referencia], 30)
+            if colocar.returncode != 0:
+                registrar(f"cambio exacto de rama falló: {detalle_resultado(colocar)}")
                 return False
 
             RUTA_ACTUALIZACION_PENDIENTE.unlink()
@@ -427,6 +453,8 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
 def comprobar_actualizacion_arranque(aviso):
     """Comprueba GitHub brevemente; un marker previo conserva prioridad estricta."""
     inicio = time.monotonic()
+    rama = rama_actualizacion()
+    referencia = f"origin/{rama}"
     if RUTA_ACTUALIZACION_PENDIENTE.exists():
         registrar("comprobación de arranque: marker pendiente tiene prioridad")
         return aplicar_actualizacion_pendiente(aviso)
@@ -435,7 +463,7 @@ def comprobar_actualizacion_arranque(aviso):
     for intento in range(1, INTENTOS_FETCH_RAPIDO + 1):
         try:
             fetch = ejecutar_git(
-                ["fetch", "origin", "main", "--quiet"], TIMEOUT_FETCH_RAPIDO
+                ["fetch", "origin", rama, "--quiet"], TIMEOUT_FETCH_RAPIDO
             )
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as error:
             registrar(
@@ -458,7 +486,7 @@ def comprobar_actualizacion_arranque(aviso):
         return True
 
     try:
-        pendientes = ejecutar_git(["rev-list", "--count", "HEAD..origin/main"], 5)
+        pendientes = ejecutar_git(["rev-list", "--count", f"HEAD..{referencia}"], 5)
         cantidad = int(pendientes.stdout.strip() or "0") if pendientes.returncode == 0 else 0
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         registrar(f"no se pudo interpretar comprobación rápida: {error}")
