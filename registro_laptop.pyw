@@ -1414,7 +1414,9 @@ def abrir_acceso_administrativo(
     return "break"
 
 
-def iniciar_contexto_contingencia(estado, tipo_operacion, matricula, parent):
+def iniciar_contexto_contingencia(
+    estado, tipo_operacion, matricula, parent, reanudar=None
+):
     global contexto_contingencia_proximidad
     contexto_contingencia_proximidad = {
         "estado": estado,
@@ -1422,8 +1424,11 @@ def iniciar_contexto_contingencia(estado, tipo_operacion, matricula, parent):
         "matricula": matricula,
         "parent": parent,
         "autorizado": False,
+        "reanudado": False,
+        "reanudar": reanudar,
         "cerrar_dialogo_fallo": None
     }
+    return contexto_contingencia_proximidad
 
 
 def registrar_dialogo_fallo_contingencia(_dialogo, cerrar_dialogo):
@@ -1531,7 +1536,7 @@ def _accion_atajo_administrativo(estado_proximidad):
 
 
 def _autorizar_bypass_proximidad(contexto):
-    """Marca el contexto en espera y cierra sólo su diálogo de proximidad."""
+    """Autoriza y reanuda la operación que estaba esperando proximidad."""
     if contexto_contingencia_proximidad is not contexto or contexto.get("autorizado"):
         return
     estado = contexto.get("estado")
@@ -1546,6 +1551,16 @@ def _autorizar_bypass_proximidad(contexto):
     cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
     if cerrar_dialogo_fallo:
         cerrar_dialogo_fallo()
+    reanudar = contexto.get("reanudar")
+    if reanudar:
+        # No depender de que wait_window vuelva a la pila que abrió el diálogo:
+        # el callback administrativo debe reanudar esta operación concreta.
+        contexto["reanudado"] = True
+        parent = contexto.get("parent")
+        try:
+            parent.after_idle(reanudar)
+        except (AttributeError, tk.TclError):
+            reanudar()
 
 
 def _solicitar_contingencia_proximidad(contexto, event=None, origen=None):
@@ -3329,7 +3344,10 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 estado_proximidad
             )
 
-        def procesar_resultado_proximidad(proximidad_valida, estado_proximidad):
+        def procesar_resultado_proximidad(
+            proximidad_valida, estado_proximidad,
+            autorizacion_administrativa=False
+        ):
             nonlocal modal_progreso, ventana_ubicacion
             nonlocal titulo_ubicacion, mensaje_ubicacion, estado_ubicacion
             proximidad_visual_activa["valor"] = False
@@ -3339,11 +3357,16 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     ESTADO_NO_DETECTADO,
                     ESTADO_ERROR
                 )
-                iniciar_contexto_contingencia(
+                contexto = iniciar_contexto_contingencia(
                     estado_proximidad,
                     "DEVOLUCION",
                     matricula,
-                    ventana
+                    ventana,
+                    reanudar=lambda: procesar_resultado_proximidad(
+                        True,
+                        estado_proximidad,
+                        autorizacion_administrativa=True
+                    )
                 )
                 if not permite_contingencia:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
@@ -3356,6 +3379,10 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
                 contingencia_autorizada = finalizar_contexto_contingencia()
                 if contingencia_autorizada:
+                    if contexto.get("reanudado"):
+                        # El callback administrativo ya conserva la devolución
+                        # pendiente; evitar que wait_window la procese dos veces.
+                        return
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
                     modal_progreso = crear_modal_verificacion_ubicacion(
                         ventana,
@@ -3381,6 +3408,11 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
             if boton:
                 boton.config(text="Verificando conexión...")
+            if autorizacion_administrativa:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN "
+                    f"estado={estado_proximidad}"
+                )
             actualizar_modal_progreso(
                 ventana_ubicacion,
                 titulo_ubicacion,

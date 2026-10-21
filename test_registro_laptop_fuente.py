@@ -167,6 +167,72 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("if not sesion:\n            return False", espera)
         self.assertIn("state=\"disabled\"", self.fuente)
 
+    def test_bypass_admin_devolucion_reanuda_la_misma_entrega_durable(self):
+        """LEJOS + CtrlAltU no puede depender del retorno de wait_window."""
+        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        bypass = self.fuente.split("def _autorizar_bypass_proximidad", 1)[1].split(
+            "def _solicitar_contingencia_proximidad", 1
+        )[0]
+        espera = self.fuente.split("def mostrar_ventana_espera_registro", 1)[1].split(
+            "def entregar_y_apagar", 1
+        )[0]
+
+        self.assertIn('"DEVOLUCION"', entrega)
+        self.assertIn("reanudar=lambda: procesar_resultado_proximidad(", entrega)
+        self.assertIn("autorizacion_administrativa=True", entrega)
+        self.assertIn("DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN", entrega)
+        self.assertIn('if contexto.get("reanudado"):', entrega)
+        self.assertIn("parent.after_idle(reanudar)", bypass)
+        self.assertIn("contexto[\"reanudado\"] = True", bypass)
+        self.assertIn("registrar_devolucion_contingencia(", espera)
+        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
+        self.assertLess(
+            espera.index("registrar_devolucion_contingencia("),
+            espera.index("apagar_windows()"),
+        )
+
+    def test_callback_bypass_reanuda_una_sola_devolucion_sin_wait_window(self):
+        modulo = self._funciones_ast(
+            "iniciar_contexto_contingencia", "_autorizar_bypass_proximidad"
+        )
+        eventos, usos, reanudaciones = [], [], []
+
+        class ParentFalso:
+            def __init__(self):
+                self.pendientes = []
+
+            def after_idle(self, callback):
+                self.pendientes.append(callback)
+
+        espacio = {
+            "contexto_contingencia_proximidad": None,
+            "registrar_evento_tecnico": eventos.append,
+            "registrar_uso_contingencia": lambda operacion, matricula: usos.append(
+                (operacion, matricula)
+            ),
+            "tk": SimpleNamespace(TclError=RuntimeError),
+        }
+        exec(compile(ast.fix_missing_locations(modulo), "<bypass>", "exec"), espacio)
+        parent = ParentFalso()
+        contexto = espacio["iniciar_contexto_contingencia"](
+            "LEJOS", "DEVOLUCION", "0824118010", parent,
+            reanudar=lambda: reanudaciones.append("DEVOLUCION_DURABLE"),
+        )
+        contexto["cerrar_dialogo_fallo"] = lambda: eventos.append("DIALOGO_CERRADO")
+
+        espacio["_autorizar_bypass_proximidad"](contexto)
+        espacio["_autorizar_bypass_proximidad"](contexto)
+
+        self.assertTrue(contexto["autorizado"])
+        self.assertTrue(contexto["reanudado"])
+        self.assertEqual(reanudaciones, [])
+        self.assertEqual(len(parent.pendientes), 1)
+        parent.pendientes.pop()()
+        self.assertEqual(reanudaciones, ["DEVOLUCION_DURABLE"])
+        self.assertEqual(usos, [("DEVOLUCION", "0824118010")])
+
     def test_prestamo_online_espera_un_intento_acotado_fuera_de_tk(self):
         prestamo = self.fuente.split("def registrar_entrada(matricula):", 1)[1].split(
             "def _existe_entrada_del_mismo_intento", 1
