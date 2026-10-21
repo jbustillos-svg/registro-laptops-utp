@@ -55,7 +55,7 @@ class PruebasActualizacionProximidad(unittest.TestCase):
     def test_proximidad_esta_habilitada(self):
         self.assertIs(self.asignacion("PROXIMIDAD_HABILITADA"), True)
         self.assertIs(self.asignacion("MODO_PRUEBA"), False)
-        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.4.6")
+        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.4.0")
 
     def test_prestamo_confirma_nombre_luego_proximidad_y_luego_identidad(self):
         confirmar = self.fuente.index("confirmado = mostrar_confirmacion_personalizada")
