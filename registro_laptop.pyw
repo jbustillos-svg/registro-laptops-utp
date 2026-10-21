@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.5"
+VERSION_SISTEMA = "1.4.6"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
@@ -341,11 +341,11 @@ def registrar_sesion_pendiente_al_iniciar():
     return sesion
 
 
-def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
+def finalizar_devolucion_durable(matricula, solicitar_sincronizacion=True):
+    """Única autoridad local: crea DEVOLUCION y cierra su sesión exacta."""
     if almacen_contingencia is None:
         return False
     try:
-        fecha, hora = _fecha_hora_local()
         sesion_previa = obtener_sesion_local_activa(matricula)
         if not sesion_previa:
             registrar_evento_tecnico(
@@ -353,6 +353,10 @@ def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
                 "motivo=DEVOLUCION_SIN_SESION_ACTIVA"
             )
             return False
+        registrar_evento_tecnico(
+            f"DEVOLUCION_INICIADA id_sesion={sesion_previa['id_sesion']}"
+        )
+        fecha, hora = _fecha_hora_local()
         registrar_evento_tecnico(
             "SESION_LOCAL_CIERRE_SOLICITADO "
             f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
@@ -365,7 +369,7 @@ def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
             f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
         )
         registrar_evento_tecnico(
-            f"CONTINGENCIA_DEVOLUCION_GUARDADA matricula={matricula} fecha={fecha} hora={hora}"
+            f"DEVOLUCION_EVENTO_DURABLE id={sesion.get('devolucion_evento_id')}"
         )
         id_evento = sesion.get("devolucion_evento_id")
         if id_evento and solicitar_sincronizacion:
@@ -373,9 +377,14 @@ def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
         return sesion
     except Exception as error:
         registrar_evento_tecnico(
-            f"CONTINGENCIA_DEVOLUCION_ERROR={type(error).__name__}: {error}"
+            f"DEVOLUCION_DURABLE_ERROR={type(error).__name__}: {error}"
         )
         return False
+
+
+def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
+    """Compatibilidad para llamadores existentes de la devolución durable."""
+    return finalizar_devolucion_durable(matricula, solicitar_sincronizacion)
 
 
 def persistir_devolucion_online_local(matricula, hora_salida):
@@ -3230,6 +3239,7 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
                                     modal_progreso, modo_contingencia=False):
     """Registra la salida actualizando el modal abierto de devolución."""
     ventana_espera, titulo_label, mensaje_label, estado_label = modal_progreso
+    estado_finalizacion = {"terminada": False, "watchdog": None}
 
     def actualizar_progreso(estado):
         estado_label.config(text=estado)
@@ -3241,16 +3251,11 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
                 "Guardando devolución..."
             )
 
-        if modo_contingencia:
-            sesion = registrar_devolucion_contingencia(
-                matricula, solicitar_sincronizacion=False
-            )
-        else:
-            sesion = registrar_salida_con_reintentos(
-                nombre, matricula, max_reintentos=3,
-                callback_intento=notificar_intento,
-                solicitar_sincronizacion=False,
-            )
+        # Sheets nunca participa antes de esta transacción SQLite.
+        del nombre, modo_contingencia
+        sesion = finalizar_devolucion_durable(
+            matricula, solicitar_sincronizacion=False
+        )
         if not sesion:
             return False
 
@@ -3264,15 +3269,45 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
             actualizar_progreso,
             "Registrando entrega..."
         )
-        sincronizar_devolucion_pre_apagado(id_evento)
+        ejecutar_en_ui(iniciar_watchdog)
+        registrar_evento_tecnico(
+            f"DEVOLUCION_SYNC_INMEDIATA_INICIADA id={id_evento}"
+        )
+        aplicada = sincronizar_devolucion_pre_apagado(id_evento)
+        registrar_evento_tecnico(
+            "DEVOLUCION_SYNC_APLICADA"
+            if aplicada else "DEVOLUCION_SYNC_PENDIENTE"
+        )
         return True
 
-    def finalizar_registro(exito):
+    def apagar_una_vez(origen):
+        if estado_finalizacion["terminada"]:
+            return
+        estado_finalizacion["terminada"] = True
+        watchdog = estado_finalizacion.get("watchdog")
+        if watchdog:
+            try:
+                ventana_entrega.after_cancel(watchdog)
+            except tk.TclError:
+                pass
+        if origen == "watchdog":
+            registrar_evento_tecnico("DEVOLUCION_WATCHDOG_APAGADO")
         cerrar_modal_verificacion_ubicacion(ventana_espera)
+        ventana_entrega.destroy()
+        apagar_windows()
+
+    def iniciar_watchdog():
+        if estado_finalizacion["terminada"]:
+            return
+        estado_finalizacion["watchdog"] = ventana_entrega.after(
+            6000, lambda: apagar_una_vez("watchdog")
+        )
+
+    def finalizar_registro(exito):
         if exito:
-            ventana_entrega.destroy()
-            apagar_windows()
+            apagar_una_vez("sync")
         else:
+            cerrar_modal_verificacion_ubicacion(ventana_espera)
             mostrar_error(
                 "Error",
                 "No se pudo registrar la salida.\n\n"
@@ -3414,7 +3449,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 return
 
             if boton:
-                boton.config(text="Verificando conexión...")
+                boton.config(text="Guardando devolución...")
             if autorizacion_administrativa:
                 registrar_evento_tecnico(
                     "DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN "
@@ -3820,6 +3855,9 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
                 "RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA "
                 f"sesion={sesion['id_sesion']} matricula={matricula}"
             )
+            registrar_evento_tecnico(
+                f"FLUJO_RECUPERACION_SESION id_sesion={sesion['id_sesion']}"
+            )
             procesando_sesion = False
             ventana.withdraw()
             ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
@@ -3970,6 +4008,9 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             return
 
         for intento in range(1, 4):
+            registrar_evento_tecnico(
+                f"CURP_SOLICITADA matricula={matricula} intento={intento}"
+            )
             curp_ingresada = pedir_curp_ultimos_2(ventana)
             if not curp_ingresada:
                 cancelar_validacion_curp()
@@ -4486,7 +4527,9 @@ def iniciar_sesion():
     def notificar_intento_ubicacion(intento, total):
         ejecutar_en_ui(actualizar_intento_ubicacion, intento, total)
 
-    def procesar_proximidad(proximidad_valida, estado_proximidad):
+    def procesar_proximidad(
+        proximidad_valida, estado_proximidad, autorizacion_administrativa=False
+    ):
         proximidad_visual_activa["valor"] = False
 
         if not proximidad_valida:
@@ -4494,11 +4537,14 @@ def iniciar_sesion():
                 ESTADO_NO_DETECTADO,
                 ESTADO_ERROR
             )
-            iniciar_contexto_contingencia(
+            contexto = iniciar_contexto_contingencia(
                 estado_proximidad,
-                "PRESTAMO",
+                "PRESTAMO_NUEVO",
                 matricula,
-                ventana
+                ventana,
+                reanudar=lambda: procesar_proximidad(
+                    True, estado_proximidad, autorizacion_administrativa=True
+                )
             )
             if not permite_contingencia:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
@@ -4517,8 +4563,10 @@ def iniciar_sesion():
 
             contingencia_autorizada = finalizar_contexto_contingencia()
             if contingencia_autorizada:
+                if contexto.get("reanudado"):
+                    return
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                procesar_proximidad(True, None)
+                procesar_proximidad(True, None, autorizacion_administrativa=True)
                 return
 
             if permite_contingencia:
@@ -4527,6 +4575,7 @@ def iniciar_sesion():
             return
 
         cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
+        registrar_evento_tecnico("FLUJO_PRESTAMO_NUEVO")
         mostrar_confirmacion_simple(
             alumno_confirmado["nombre"],
             matricula,

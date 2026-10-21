@@ -170,7 +170,7 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
         self.assertNotIn("time.sleep(", espera)
         self.assertLess(
-            espera.index("registrar_salida_con_reintentos("),
+            espera.index("finalizar_devolucion_durable("),
             espera.index("sincronizar_devolucion_pre_apagado(id_evento)"),
         )
         self.assertLess(
@@ -180,6 +180,22 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("if exito:", espera)
         self.assertIn("if not sesion:\n            return False", espera)
         self.assertIn("state=\"disabled\"", self.fuente)
+
+    def test_prestamo_bypass_reanuda_curp_y_devolucion_tiene_watchdog(self):
+        prestamo = self.fuente.split("def iniciar_sesion", 1)[1].split(
+            "def crear_pantalla_login", 1
+        )[0]
+        espera = self.fuente.split("def mostrar_ventana_espera_registro", 1)[1].split(
+            "def entregar_y_apagar", 1
+        )[0]
+        self.assertIn('"PRESTAMO_NUEVO"', prestamo)
+        self.assertIn("reanudar=lambda: procesar_proximidad(", prestamo)
+        self.assertIn("CURP_SOLICITADA", self.fuente)
+        self.assertIn("FLUJO_RECUPERACION_SESION", self.fuente)
+        self.assertIn("finalizar_devolucion_durable(", espera)
+        self.assertIn("DEVOLUCION_SYNC_INMEDIATA_INICIADA", espera)
+        self.assertIn("DEVOLUCION_WATCHDOG_APAGADO", espera)
+        self.assertIn("6000", espera)
 
     def test_bypass_admin_devolucion_reanuda_la_misma_entrega_durable(self):
         """LEJOS + CtrlAltU no puede depender del retorno de wait_window."""
@@ -200,10 +216,10 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn('if contexto.get("reanudado"):', entrega)
         self.assertIn("parent.after_idle(reanudar)", bypass)
         self.assertIn("contexto[\"reanudado\"] = True", bypass)
-        self.assertIn("registrar_devolucion_contingencia(", espera)
+        self.assertIn("finalizar_devolucion_durable(", espera)
         self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
         self.assertLess(
-            espera.index("registrar_devolucion_contingencia("),
+            espera.index("finalizar_devolucion_durable("),
             espera.index("apagar_windows()"),
         )
 
@@ -578,12 +594,12 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
     def test_bypass_reanuda_prestamo_y_devolucion_sin_duplicar_sesion(self):
         self.assertEqual(self.fuente.count("if contingencia_autorizada:"), 2)
         self.assertEqual(self.fuente.count("procesar_resultado_proximidad(True, None)"), 1)
-        self.assertEqual(self.fuente.count("procesar_proximidad(True, None)"), 1)
+        self.assertIn("reanudar=lambda: procesar_proximidad(", self.fuente)
         self.assertIn("mostrar_confirmacion_simple(", self.fuente)
         entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
             "def mostrar_ventana_entrega", 1
         )[0]
-        ruta_durable = entrega.split('if boton:\n                boton.config(text="Verificando conexión...")', 1)[1].split(
+        ruta_durable = entrega.split('if boton:\n                boton.config(text="Guardando devolución...")', 1)[1].split(
             "def comprobar_devolucion", 1
         )[0]
         self.assertIn("mostrar_ventana_espera_registro(", ruta_durable)
