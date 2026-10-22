@@ -9,6 +9,7 @@ import msvcrt
 import re
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import requests
@@ -19,6 +20,11 @@ TIMEOUT_RESPUESTA = 12
 TIMEOUT_INTERACTIVO = (2, 5)
 TIMEOUT_SEGUNDO_PLANO = (TIMEOUT_CONEXION, TIMEOUT_RESPUESTA)
 TIMEOUT_PRE_APAGADO = (2, 3)
+BACKOFF_DEPENDENCIA_INICIAL_SEGUNDOS = 5 * 60
+BACKOFF_DEPENDENCIA_MAXIMO_SEGUNDOS = 6 * 60 * 60
+TIPOS_CON_DEPENDENCIA_PRESTAMO = frozenset(
+    ("DEVOLUCION", "NO_ENTREGA", "CIERRE_AUTOMATICO")
+)
 
 
 class ErrorCoordinador(RuntimeError):
@@ -229,6 +235,59 @@ class SincronizadorContingencia:
             evento, self.configuracion, self._post, timeout
         )
 
+    @staticmethod
+    def _datos_evento(evento):
+        try:
+            datos = json.loads(evento.get("datos_json") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return datos if isinstance(datos, dict) else {}
+
+    @classmethod
+    def _prestamo_dependencia_id(cls, evento):
+        """Obtiene el UUID del pr\u00e9stamo de la misma sesi\u00f3n, si existe."""
+        return str(cls._datos_evento(evento).get("prestamo_evento_id") or "").strip()
+
+    @staticmethod
+    def _orden_evento(evento):
+        """Da salida a pr\u00e9stamos antes que a sus operaciones dependientes."""
+        tipo = evento.get("tipo_evento")
+        intentos = int(evento.get("intentos") or 0)
+        if tipo == "PRESTAMO" and intentos == 0:
+            prioridad = 0
+        elif tipo == "PRESTAMO":
+            prioridad = 1
+        elif intentos == 0:
+            prioridad = 2
+        else:
+            prioridad = 3
+        return (prioridad, evento.get("fecha_creacion") or "", evento.get("id_evento") or "")
+
+    @staticmethod
+    def _instante(valor):
+        try:
+            return datetime.fromisoformat(str(valor))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _en_backoff(cls, evento, ahora):
+        """Difiere s\u00f3lo la dependencia remota repetidamente no encontrada."""
+        if "DEPENDENCIA_PRESTAMO_NO_ENCONTRADA" not in str(evento.get("ultimo_error") or ""):
+            return False
+        ultimo = cls._instante(evento.get("fecha_ultimo_intento"))
+        if ultimo is None:
+            return False
+        intentos = max(1, int(evento.get("intentos") or 0))
+        espera = min(
+            BACKOFF_DEPENDENCIA_INICIAL_SEGUNDOS * (2 ** (intentos - 1)),
+            BACKOFF_DEPENDENCIA_MAXIMO_SEGUNDOS,
+        )
+        try:
+            return (ahora - ultimo).total_seconds() < espera
+        except TypeError:
+            return False
+
     def sincronizar_evento(self, id_evento, timeout=TIMEOUT_PRE_APAGADO):
         """Intenta una sola vez un evento durable concreto, sin cambiar su UUID u hora."""
         if not self._lock.acquire(blocking=False):
@@ -266,6 +325,7 @@ class SincronizadorContingencia:
         realizados = 0
         try:
             pendientes = self.almacen.obtener_eventos_pendientes()
+            self.registrar(f"SINCRONIZACION_COLA eventos={len(pendientes)}")
             if not pendientes:
                 return 0
             if not self.configuracion.get("URL_APPS_SCRIPT") or not self.configuracion.get("API_KEY"):
@@ -273,21 +333,56 @@ class SincronizadorContingencia:
             with self._bloqueo_interproceso() as adquirido:
                 if not adquirido:
                     return 0
-                for evento in pendientes[:limite]:
+                ahora = datetime.now().astimezone()
+                por_id = {evento["id_evento"]: evento for evento in pendientes}
+                procesados = 0
+                for evento in sorted(pendientes, key=self._orden_evento):
+                    if procesados >= limite:
+                        break
+                    id_evento = evento["id_evento"]
+                    if self._en_backoff(evento, ahora):
+                        self.registrar(
+                            "SINCRONIZACION_EVENTO_DIFERIDO "
+                            f"id={id_evento} motivo=BACKOFF"
+                        )
+                        continue
+                    prestamo_id = self._prestamo_dependencia_id(evento)
+                    prestamo_pendiente = por_id.get(prestamo_id)
+                    if (
+                        evento.get("tipo_evento") in TIPOS_CON_DEPENDENCIA_PRESTAMO
+                        and prestamo_pendiente
+                        and not prestamo_pendiente.get("sincronizado")
+                    ):
+                        self.registrar(
+                            "SINCRONIZACION_EVENTO_DIFERIDO "
+                            f"id={id_evento} motivo=DEPENDENCIA_PRESTAMO_PENDIENTE"
+                        )
+                        continue
                     try:
                         referencia = self._enviar(evento)
-                        self.almacen.marcar_sincronizado(evento["id_evento"], referencia)
+                        self.almacen.marcar_sincronizado(id_evento, referencia)
+                        evento["sincronizado"] = 1
                         realizados += 1
+                        procesados += 1
                     except Exception as error:
-                        self.almacen.incrementar_intentos(evento["id_evento"], str(error)[:500])
+                        self.almacen.incrementar_intentos(id_evento, str(error)[:500])
+                        procesados += 1
                         self.registrar(
                             "SINCRONIZACION_EVENTO_ERROR "
-                            f"id={evento['id_evento']} tipo={evento['tipo_evento']} "
+                            f"id={id_evento} tipo={evento['tipo_evento']} "
                             f"{diagnostico_error_coordinador(error)}"
                         )
                         # No monopolizar el bloqueo con una cola histórica en
                         # error: el siguiente ciclo recuperará ese UUID.
-                        break
+                        self.registrar(
+                            "SINCRONIZACION_EVENTO_CONTINUA_TRAS_ERROR "
+                            f"id={id_evento}"
+                        )
         finally:
             self._lock.release()
+        pendientes_restantes = len(self.almacen.obtener_eventos_pendientes())
+        self.registrar(
+            "SINCRONIZACION_COMPLETA "
+            f"aplicados={realizados} pendientes={pendientes_restantes}"
+        )
         return realizados

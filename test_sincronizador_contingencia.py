@@ -89,26 +89,111 @@ class PruebasClienteCoordinador(unittest.TestCase):
     def test_evento_nuevo_no_es_bloqueado_por_error_historico(self):
         self.almacen.marcar_sincronizado(self.evento)
         viejo = self.almacen.crear_evento(
-            "LAP-0", "NO_ENTREGA", "A0", "Anterior", "2026-10-01", "08:00:00",
+            "LAP-0", "CIERRE_AUTOMATICO", "A0", "Anterior", "2026-10-01", "08:00:00",
             "LAP-0", {}, id_evento="viejo-error", fecha_creacion="2026-10-01T08:00:00"
         )
-        self.almacen.incrementar_intentos(viejo, "DEPENDENCIA_PRESTAMO_NO_ENCONTRADA")
         nuevo = self.almacen.crear_evento(
-            "LAP-1", "DEVOLUCION", "A1", "Ana", "2026-10-21", "10:00:00",
+            "LAP-1", "PRESTAMO", "A1", "Ana", "2026-10-21", "10:00:00",
             "LAP-1", {}, id_evento="nuevo-actual", fecha_creacion="2026-10-21T10:00:00"
         )
         enviados = []
+
+        def post(_url, json, timeout, **_k):
+            enviados.append(json["id_evento"])
+            if json["id_evento"] == viejo:
+                return RespuestaFalsa({"codigo": "DEPENDENCIA_PRESTAMO_NO_ENCONTRADA"})
+            return RespuestaFalsa({"estado": "APLICADO"})
+
         cliente = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append, post=post,
+        )
+
+        self.assertEqual(cliente.sincronizar(), 1)
+        self.assertEqual(enviados, [nuevo, viejo])
+        self.assertEqual(self.almacen.obtener_evento(nuevo)["sincronizado"], 1)
+        self.assertEqual(self.almacen.obtener_evento(viejo)["sincronizado"], 0)
+        self.assertTrue(any("SINCRONIZACION_EVENTO_CONTINUA_TRAS_ERROR" in log for log in self.logs))
+
+    def test_devolucion_se_envia_despues_del_prestamo_de_la_misma_sesion(self):
+        self.almacen.marcar_sincronizado(self.evento)
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A2", "Beto", "LAP-2", "2026-10-21", "09:00:00"
+        )
+        entrega = self.almacen.registrar_devolucion_offline(
+            "A2", "LAP-2", "2026-10-21", "12:00:00", id_sesion=sesion["id_sesion"]
+        )
+        enviados = []
+        cantidad = SincronizadorContingencia(
             self.almacen, CONFIG, self.logs.append,
             post=lambda _url, json, timeout, **_k: (
                 enviados.append(json["id_evento"])
                 or RespuestaFalsa({"estado": "APLICADO"})
             ),
+        ).sincronizar()
+
+        self.assertEqual(cantidad, 2)
+        self.assertEqual(enviados, [sesion["prestamo_evento_id"], entrega["devolucion_evento_id"]])
+
+    def test_devolucion_no_se_envia_si_su_prestamo_pendiente_falla(self):
+        self.almacen.marcar_sincronizado(self.evento)
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A3", "Caro", "LAP-3", "2026-10-21", "09:00:00"
+        )
+        entrega = self.almacen.registrar_devolucion_offline(
+            "A3", "LAP-3", "2026-10-21", "12:00:00", id_sesion=sesion["id_sesion"]
+        )
+        enviados = []
+        cantidad = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: (
+                enviados.append(json["id_evento"])
+                or (_ for _ in ()).throw(requests.Timeout())
+            ),
+        ).sincronizar()
+
+        self.assertEqual(cantidad, 0)
+        self.assertEqual(enviados, [sesion["prestamo_evento_id"]])
+        self.assertEqual(self.almacen.obtener_evento(entrega["devolucion_evento_id"])["sincronizado"], 0)
+        self.assertTrue(any("DEPENDENCIA_PRESTAMO_PENDIENTE" in log for log in self.logs))
+
+    def test_error_historico_se_difiere_en_el_siguiente_ciclo(self):
+        self.almacen.marcar_sincronizado(self.evento)
+        viejo = self.almacen.crear_evento(
+            "LAP-0", "CIERRE_AUTOMATICO", "A0", "Anterior", "2026-10-01", "08:00:00",
+            "LAP-0", {}, id_evento="viejo-backoff", fecha_creacion="2026-10-01T08:00:00"
+        )
+        self.almacen.incrementar_intentos(viejo, "DEPENDENCIA_PRESTAMO_NO_ENCONTRADA")
+        enviados = []
+        cliente = SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: enviados.append(json["id_evento"]),
         )
 
-        self.assertEqual(cliente.sincronizar(), 2)
-        self.assertEqual(enviados[0], nuevo)
-        self.assertEqual(self.almacen.obtener_evento(nuevo)["sincronizado"], 1)
+        self.assertEqual(cliente.sincronizar(), 0)
+        self.assertEqual(enviados, [])
+        self.assertTrue(any("id=viejo-backoff motivo=BACKOFF" in log for log in self.logs))
+
+    def test_cada_uuid_pendiente_se_envia_una_sola_vez_por_ciclo(self):
+        self.almacen.marcar_sincronizado(self.evento)
+        primero = self.almacen.crear_evento(
+            "LAP-4", "PRESTAMO", "A4", "Dani", "2026-10-21", "09:00:00",
+            "LAP-4", {}, id_evento="uuid-unico-1"
+        )
+        segundo = self.almacen.crear_evento(
+            "LAP-5", "PRESTAMO", "A5", "Eva", "2026-10-21", "09:01:00",
+            "LAP-5", {}, id_evento="uuid-unico-2"
+        )
+        enviados = []
+        SincronizadorContingencia(
+            self.almacen, CONFIG, self.logs.append,
+            post=lambda _url, json, timeout, **_k: (
+                enviados.append(json["id_evento"])
+                or RespuestaFalsa({"estado": "APLICADO"})
+            ),
+        ).sincronizar()
+
+        self.assertEqual(enviados, [primero, segundo])
+        self.assertEqual(len(enviados), len(set(enviados)))
 
     def test_sin_configuracion_no_intenta_post_y_deja_pendiente(self):
         llamadas = []

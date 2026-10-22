@@ -13,7 +13,7 @@ import sqlite3
 import uuid
 
 
-SCHEMA_VERSION_ACTUAL = 5
+SCHEMA_VERSION_ACTUAL = 6
 
 INTERNET_OK = "INTERNET_OK"
 INTERNET_ERROR = "INTERNET_ERROR"
@@ -96,6 +96,13 @@ class ContingenciaLocal:
                     conexion.execute(
                         "UPDATE schema_version SET version = 5 WHERE id = 1"
                     )
+                    version = 5
+                if version < 6:
+                    self._migrar_a_v6(conexion)
+                    conexion.execute(
+                        "UPDATE schema_version SET version = 6 WHERE id = 1"
+                    )
+                    version = 6
                 if version > SCHEMA_VERSION_ACTUAL:
                     raise RuntimeError(
                         "La base local fue creada por una versión más reciente"
@@ -264,6 +271,17 @@ class ContingenciaLocal:
         if "curp_ultimos_2" not in columnas:
             conexion.execute(
                 "ALTER TABLE personas_cache ADD COLUMN curp_ultimos_2 TEXT"
+            )
+
+    @staticmethod
+    def _migrar_a_v6(conexion):
+        """Persiste el instante del fallo para diferir reintentos hist\u00f3ricos."""
+        columnas = {
+            fila["name"] for fila in conexion.execute("PRAGMA table_info(eventos_pendientes)")
+        }
+        if "fecha_ultimo_intento" not in columnas:
+            conexion.execute(
+                "ALTER TABLE eventos_pendientes ADD COLUMN fecha_ultimo_intento TEXT"
             )
 
     def version_esquema(self):
@@ -867,10 +885,11 @@ class ContingenciaLocal:
                 """
                 UPDATE eventos_pendientes
                 SET intentos = intentos + 1,
-                    ultimo_error = COALESCE(?, ultimo_error)
+                    ultimo_error = COALESCE(?, ultimo_error),
+                    fecha_ultimo_intento = ?
                 WHERE id_evento = ?
                 """,
-                (ultimo_error, id_evento),
+                (ultimo_error, self._ahora(), id_evento),
             )
         return self.obtener_evento(id_evento)
 

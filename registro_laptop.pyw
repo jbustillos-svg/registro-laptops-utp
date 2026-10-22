@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.11"
+VERSION_SISTEMA = "1.4.12"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
