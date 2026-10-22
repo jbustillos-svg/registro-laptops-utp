@@ -328,17 +328,41 @@ def obtener_sesion_local_activa(matricula=None):
 
 
 def registrar_sesion_pendiente_al_iniciar():
-    """Detecta una sesión persistente sin exponerla ni modificarla en la UI."""
+    """Cierra una sesión heredada; nunca la recupera para una nueva ejecución."""
     sesion = obtener_sesion_local_activa()
     if not sesion:
-        registrar_evento_tecnico("RECUPERACION_SESION_LOCAL resultado=NO_ACTIVA_UI_LOGIN")
+        registrar_evento_tecnico("SESION_RESIDUAL_DETECTADA resultado=NO_ACTIVA")
         return None
 
     registrar_evento_tecnico(
-        "RECUPERACION_SESION_LOCAL resultado=ACTIVA_UI_LOGIN "
-        f"sesion={sesion['id_sesion']}"
+        f"SESION_RESIDUAL_DETECTADA id_sesion={sesion['id_sesion']}"
     )
-    return sesion
+    try:
+        fecha, hora = _fecha_hora_local()
+        resultado = almacen_contingencia.cerrar_sesion_residual_al_arrancar(
+            socket.gethostname(), fecha, hora, socket.gethostname()
+        )
+        cerrada = resultado.get("sesion")
+        if resultado.get("resultado") != "SESION_RESIDUAL_CERRADA" or not cerrada:
+            registrar_evento_tecnico("SESION_RESIDUAL_CIERRE_OMITIDO motivo=SIN_SESION")
+            return None
+        if resultado.get("no_entrega_creada"):
+            registrar_evento_tecnico(
+                f"NO_ENTREGA_RESIDUAL_CREADA id_sesion={cerrada['id_sesion']}"
+            )
+        for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+            if cerrada.get(campo):
+                enviar_evento_local_inmediato(cerrada[campo])
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_CERRADA id_sesion={cerrada['id_sesion']}"
+        )
+        registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO")
+        return cerrada
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_CIERRE_ERROR tipo={type(error).__name__}"
+        )
+        return None
 
 
 def finalizar_devolucion_durable(matricula, solicitar_sincronizacion=True):
@@ -4002,27 +4026,6 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
     return False, None
 
 
-def reconciliar_sesion_residual_remota(sesion):
-    """Confirma si la misma sesión local ya tiene Hora_Salida en Sheets."""
-    if hoja_registros is None:
-        return None
-    try:
-        for fila in reversed(hoja_registros.get_all_values()):
-            if len(fila) <= COL_OBSERVACION:
-                continue
-            if (
-                str(fila[COL_MATRICULA]).strip() == str(sesion["matricula"]).strip()
-                and str(fila[COL_LAPTOP_ID]).strip() == str(sesion["laptop_id"]).strip()
-                and str(fila[COL_FECHA]).strip() == str(sesion["fecha_entrada"]).strip()
-                and str(fila[COL_HORA_INGRESO]).strip() == str(sesion["hora_entrada"]).strip()
-                and str(fila[COL_HORA_SALIDA]).strip()
-            ):
-                return str(fila[COL_HORA_SALIDA]).strip()
-    except Exception as error:
-        raise ErrorConsultaGoogle("No se pudo reconciliar la sesión residual") from error
-    return None
-
-
 def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
                                 modo_contingencia=False, persona_cache=None):
     global entrada, ventana, procesando_sesion
@@ -4060,52 +4063,32 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             f"SESION_RESIDUAL_DETECTADA id_sesion={previa['id_sesion']}"
         )
         try:
-            if almacen_contingencia.reconciliar_sesion_residual_local(
-                previa["id_sesion"]
-            ):
-                registrar_evento_tecnico(
-                    f"SESION_RESIDUAL_RECONCILIADA origen=LOCAL id_sesion={previa['id_sesion']}"
-                )
-                ejecutar_en_ui(procesar_sesion_local, "residual_reconciliada", previa)
-                return
-            # En contingencia no se adivina el estado remoto: una fila sin
-            # evidencia local de cierre sigue siendo una sesión recuperable.
-            if not modo_contingencia:
-                hora_salida = reconciliar_sesion_residual_remota(previa)
-                if hora_salida and almacen_contingencia.cerrar_sesion_residual_remota(
-                    previa["id_sesion"], hora_salida
-                ):
-                    registrar_evento_tecnico(
-                        f"SESION_RESIDUAL_RECONCILIADA origen=REMOTO id_sesion={previa['id_sesion']}"
-                    )
-                    ejecutar_en_ui(procesar_sesion_local, "residual_reconciliada", previa)
-                    return
-        except ErrorConsultaGoogle:
-            # Sin evidencia suficiente se conserva la recuperación segura.
-            registrar_evento_tecnico(
-                f"SESION_RESIDUAL_SIN_CONFIRMACION id_sesion={previa['id_sesion']}"
+            fecha, hora = _fecha_hora_local()
+            resultado = almacen_contingencia.cerrar_sesion_residual_al_arrancar(
+                socket.gethostname(), fecha, hora, socket.gethostname()
             )
-        if previa["matricula"] == str(matricula).strip():
-            ejecutar_en_ui(procesar_sesion_local, "misma_matricula", previa)
-            return
-        exito = cerrar_sesion_contingencia_por_nueva_sesion(matricula)
-        ejecutar_en_ui(procesar_sesion_local, "sesion_anterior_cerrada" if exito else "error", previa)
+            cerrada = resultado.get("sesion")
+            if resultado.get("resultado") == "SESION_RESIDUAL_CERRADA" and cerrada:
+                if resultado.get("no_entrega_creada"):
+                    registrar_evento_tecnico(
+                        f"NO_ENTREGA_RESIDUAL_CREADA id_sesion={cerrada['id_sesion']}"
+                    )
+                for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+                    if cerrada.get(campo):
+                        enviar_evento_local_inmediato(cerrada[campo])
+                registrar_evento_tecnico(
+                    f"SESION_RESIDUAL_CERRADA id_sesion={cerrada['id_sesion']}"
+                )
+                ejecutar_en_ui(procesar_sesion_local, "residual_cerrada", cerrada)
+                return
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"SESION_RESIDUAL_CIERRE_ERROR tipo={type(error).__name__}"
+            )
+        ejecutar_en_ui(procesar_sesion_local, "error", previa)
 
     def procesar_sesion_local(resultado, sesion):
         global procesando_sesion
-        if resultado == "misma_matricula":
-            registrar_evento_tecnico(
-                "RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA "
-                f"sesion={sesion['id_sesion']} matricula={matricula}"
-            )
-            registrar_evento_tecnico(
-                f"FLUJO_RECUPERACION_SESION id_sesion={sesion['id_sesion']}"
-            )
-            registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=RECUPERACION_SESION")
-            procesando_sesion = False
-            ventana.withdraw()
-            ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
-            return
         if resultado == "error":
             mostrar_error(
                 "Error",
@@ -4404,10 +4387,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
         ventana.withdraw()
         ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
 
-    sesion_local = obtener_sesion_local_activa()
-    if modo_contingencia or (
-        sesion_local and sesion_local["matricula"] == str(matricula).strip()
-    ):
+    if modo_contingencia:
         threading.Thread(target=resolver_sesion_local, daemon=True).start()
     else:
         threading.Thread(target=consultar_sesion, daemon=True).start()

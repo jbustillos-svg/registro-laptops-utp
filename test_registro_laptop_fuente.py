@@ -27,13 +27,16 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
             self.fuente,
         )
 
-    def test_arranque_detecta_sesion_local_y_conserva_login_de_matricula(self):
+    def test_arranque_cierra_sesion_residual_y_conserva_login_de_matricula(self):
         self.assertIn("def registrar_sesion_pendiente_al_iniciar():", self.fuente)
         self.assertIn('sesion = obtener_sesion_local_activa()', self.fuente)
         self.assertIn(
-            "RECUPERACION_SESION_LOCAL resultado=ACTIVA_UI_LOGIN",
+            "SESION_RESIDUAL_DETECTADA",
             self.fuente,
         )
+        self.assertIn("cerrar_sesion_residual_al_arrancar", self.fuente)
+        self.assertIn("NO_ENTREGA_RESIDUAL_CREADA", self.fuente)
+        self.assertIn("SESION_RESIDUAL_CERRADA", self.fuente)
         self.assertIn(
             "ventana.after_idle(registrar_sesion_pendiente_al_iniciar)", self.fuente,
         )
@@ -43,22 +46,24 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertNotIn("ventana.withdraw()", recuperacion)
         self.assertNotIn("mostrar_ventana_entrega", recuperacion)
 
-    def test_misma_matricula_reutiliza_sesion_y_muestra_entrega(self):
-        self.assertIn('resultado == "misma_matricula"', self.fuente)
-        self.assertIn("RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA", self.fuente)
-        self.assertIn("lambda: mostrar_ventana_entrega(nombre, matricula)", self.fuente)
+    def test_sesion_residual_no_se_recupera_como_entrega(self):
+        self.assertNotIn("FLUJO_RECUPERACION_SESION", self.fuente)
+        self.assertNotIn("FLUJO_SELECCIONADO tipo=RECUPERACION_SESION", self.fuente)
+        seleccion = self.fuente.split("def mostrar_confirmacion_simple", 1)[1].split(
+            "def cambiar_estado", 1
+        )[0]
+        self.assertIn("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO", seleccion)
+        self.assertIn("iniciar_validacion_identidad()", seleccion)
 
-    def test_sesion_residual_se_reconcilia_antes_de_elegir_flujo(self):
+    def test_sesion_residual_se_cierra_localmente_antes_de_elegir_flujo(self):
         seleccion = self.fuente.split("def mostrar_confirmacion_simple", 1)[1].split(
             "def cambiar_estado", 1
         )[0]
         self.assertIn("SESION_RESIDUAL_DETECTADA", seleccion)
-        self.assertIn("reconciliar_sesion_residual_local", seleccion)
-        self.assertIn("reconciliar_sesion_residual_remota", seleccion)
-        self.assertIn("SESION_RESIDUAL_RECONCILIADA origen=LOCAL", seleccion)
-        self.assertIn("SESION_RESIDUAL_RECONCILIADA origen=REMOTO", seleccion)
+        self.assertIn("cerrar_sesion_residual_al_arrancar", seleccion)
+        self.assertIn("NO_ENTREGA_RESIDUAL_CREADA", seleccion)
+        self.assertIn("SESION_RESIDUAL_CERRADA", seleccion)
         self.assertIn("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO", seleccion)
-        self.assertIn("FLUJO_SELECCIONADO tipo=RECUPERACION_SESION", seleccion)
         self.assertLess(
             seleccion.index("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO"),
             seleccion.index("iniciar_validacion_identidad()"),
@@ -226,7 +231,6 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn('"PRESTAMO_NUEVO"', prestamo)
         self.assertIn("reanudar=lambda: procesar_proximidad(", prestamo)
         self.assertIn("CURP_SOLICITADA", self.fuente)
-        self.assertIn("FLUJO_RECUPERACION_SESION", self.fuente)
         posicion_bypass = prestamo.index('"PRESTAMO_NUEVO"')
         self.assertNotEqual(
             prestamo.find("mostrar_confirmacion_simple(", posicion_bypass), -1

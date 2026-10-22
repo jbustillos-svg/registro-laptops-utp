@@ -681,6 +681,75 @@ class ContingenciaLocal:
             "CIERRE_AUTOMATICO_POR_NUEVA_SESION", id_sesion,
         )
 
+    def cerrar_sesion_residual_al_arrancar(self, laptop_id, fecha_evento,
+                                            hora_evento, equipo=None):
+        """Cierra atómicamente una sesión heredada con sus dos eventos.
+
+        No depende de Sheets. Los UUID deterministas y las columnas de sesión
+        hacen que reinicios repetidos no creen NO_ENTREGA duplicados.
+        """
+        with self._conexion() as conexion:
+            conexion.execute("BEGIN IMMEDIATE")
+            try:
+                sesion = conexion.execute(
+                    """
+                    SELECT * FROM sesiones_locales
+                    WHERE laptop_id = ? AND hora_salida IS NULL
+                    """,
+                    (laptop_id,),
+                ).fetchone()
+                if not sesion:
+                    conexion.commit()
+                    return {"resultado": "SIN_SESION", "sesion": None}
+
+                id_no_entrega = sesion["no_entrega_evento_id"] or str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"utp-v141:NO_ENTREGA:{sesion['id_sesion']}"
+                ))
+                id_cierre = sesion["cierre_automatico_evento_id"] or str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"utp-v141:CIERRE_AUTOMATICO:{sesion['id_sesion']}",
+                ))
+                crear_no_entrega = not sesion["no_entrega_evento_id"]
+                crear_cierre = not sesion["cierre_automatico_evento_id"]
+                conexion.execute(
+                    """
+                    UPDATE sesiones_locales
+                    SET hora_salida = ?, observacion = ?, no_entrega_evento_id = ?,
+                        cierre_automatico_evento_id = ?, fecha_actualizacion = ?
+                    WHERE id_sesion = ?
+                    """,
+                    (
+                        hora_evento, "CIERRE_AUTOMATICO_POR_REINICIO",
+                        id_no_entrega, id_cierre, self._ahora(), sesion["id_sesion"],
+                    ),
+                )
+                sesion_cerrada = conexion.execute(
+                    "SELECT * FROM sesiones_locales WHERE id_sesion = ?",
+                    (sesion["id_sesion"],),
+                ).fetchone()
+                if crear_no_entrega:
+                    self._insertar_evento(
+                        conexion, id_no_entrega, equipo or laptop_id, "NO_ENTREGA",
+                        sesion_cerrada, fecha_evento, hora_evento,
+                        self._datos_fila_registro(sesion_cerrada),
+                    )
+                if crear_cierre:
+                    self._insertar_evento(
+                        conexion, id_cierre, equipo or laptop_id, "CIERRE_AUTOMATICO",
+                        sesion_cerrada, fecha_evento, hora_evento,
+                        self._datos_fila_registro(sesion_cerrada),
+                    )
+                conexion.commit()
+                return {
+                    "resultado": "SESION_RESIDUAL_CERRADA",
+                    "sesion": self._fila_a_dict(sesion_cerrada),
+                    "no_entrega_creada": crear_no_entrega,
+                    "cierre_creado": crear_cierre,
+                }
+            except Exception:
+                conexion.rollback()
+                raise
+
     def resolver_sesion_activa_por_nueva_matricula(
         self, laptop_id, matricula, fecha_evento, hora_evento, equipo=None,
         registrar_no_entrega=True,

@@ -536,6 +536,60 @@ class PruebasContingenciaLocal(unittest.TestCase):
         )
         self.assertEqual(sesion["observacion"], "CIERRE_AUTOMATICO_POR_NUEVA_SESION")
 
+    def test_arranque_cierra_residual_con_no_entrega_y_cierre_una_vez(self):
+        """Un préstamo heredado se abandona localmente aun sin sincronización."""
+        self.almacen.inicializar()
+        anterior = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+
+        resultado = self.almacen.cerrar_sesion_residual_al_arrancar(
+            "LAP-1", "2026-10-16", "10:00:00"
+        )
+        self.assertEqual(resultado["resultado"], "SESION_RESIDUAL_CERRADA")
+        self.assertTrue(resultado["no_entrega_creada"])
+        self.assertTrue(resultado["cierre_creado"])
+        self.assertEqual(resultado["sesion"]["id_sesion"], anterior["id_sesion"])
+        self.assertEqual(resultado["sesion"]["observacion"], "CIERRE_AUTOMATICO_POR_REINICIO")
+        self.assertIsNone(self.almacen.obtener_sesion_activa("LAP-1"))
+
+        pendientes = self.almacen.obtener_eventos_pendientes()
+        self.assertEqual(
+            len([e for e in pendientes if e["tipo_evento"] == "NO_ENTREGA"]), 1
+        )
+        self.assertEqual(
+            len([e for e in pendientes if e["tipo_evento"] == "CIERRE_AUTOMATICO"]), 1
+        )
+        self.assertTrue(all(not e["sincronizado"] for e in pendientes))
+
+        reiniciado = ContingenciaLocal(Path(self.temporal.name))
+        repetido = reiniciado.cerrar_sesion_residual_al_arrancar(
+            "LAP-1", "2026-10-16", "10:05:00"
+        )
+        self.assertEqual(repetido["resultado"], "SIN_SESION")
+        eventos_despues = reiniciado.obtener_eventos_pendientes()
+        self.assertEqual(
+            len([e for e in eventos_despues if e["tipo_evento"] == "NO_ENTREGA"]), 1
+        )
+
+    def test_residual_cerrada_permite_misma_matricula_como_prestamo_nuevo(self):
+        self.almacen.inicializar()
+        anterior = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        self.almacen.cerrar_sesion_residual_al_arrancar(
+            "LAP-1", "2026-10-16", "10:00:00"
+        )
+
+        nuevo = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "10:05:00"
+        )
+        self.assertFalse(nuevo["sesion_existente"])
+        self.assertNotEqual(nuevo["id_sesion"], anterior["id_sesion"])
+        self.assertEqual(
+            self.almacen.obtener_sesion_activa("LAP-1")["id_sesion"], nuevo["id_sesion"]
+        )
+
     def test_archivos_sqlite_locales_no_se_trackean(self):
         raiz = Path(__file__).parent
         for nombre in (
