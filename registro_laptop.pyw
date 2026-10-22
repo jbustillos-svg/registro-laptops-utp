@@ -3273,7 +3273,7 @@ def registrar_salida_con_reintentos(
         return False
 
 
-def crear_control_devolucion(ventana, matricula, nombre, boton):
+def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
     """Construye la única entrada de la devolución para una ventana de entrega.
 
     ``estado`` es la única autoridad de etapa. Las referencias al modal y a los
@@ -3281,6 +3281,9 @@ def crear_control_devolucion(ventana, matricula, nombre, boton):
     """
     estado = {"estado": "IDLE", "timers": {}, "modal": None}
     ventana._estado_devolucion = estado
+
+    def obtener_boton():
+        return referencia_boton.get("widget")
 
     def cambiar_estado(nuevo):
         anterior = estado["estado"]
@@ -3353,8 +3356,9 @@ def crear_control_devolucion(ventana, matricula, nombre, boton):
         cerrar_modal()
         cambiar_estado("ERROR_RECUPERABLE")
         try:
+            boton = obtener_boton()
             boton.config(state="normal", text="ENTREGAR Y APAGAR")
-        except tk.TclError:
+        except (AttributeError, tk.TclError):
             pass
         # El command se configura una única vez al crear el botón y nunca se
         # reemplaza durante el intento.
@@ -3442,6 +3446,7 @@ def crear_control_devolucion(ventana, matricula, nombre, boton):
             )
         cambiar_estado("PERSISTIENDO_LOCAL")
         try:
+            boton = obtener_boton()
             boton.config(text="Guardando devolución...")
             actualizar_modal(
                 "Registrando devolución",
@@ -3514,13 +3519,18 @@ def crear_control_devolucion(ventana, matricula, nombre, boton):
 
     def iniciar_devolucion():
         """Única entrada pública del botón ENTREGAR Y APAGAR."""
+        registrar_evento_tecnico(
+            f"DEVOLUCION_CLICK_RECIBIDO estado={estado['estado']}"
+        )
         if estado["estado"] != "IDLE":
             registrar_evento_tecnico(
-                f"DEVOLUCION_CLIC_IGNORADO estado={estado['estado']}"
+                "DEVOLUCION_CLICK_IGNORADO motivo=ESTADO_NO_IDLE "
+                f"estado={estado['estado']}"
             )
             return
         cambiar_estado("VALIDANDO_PROXIMIDAD")
         try:
+            boton = obtener_boton()
             boton.config(
                 state="disabled",
                 text="Verificando ubicación..." if PROXIMIDAD_HABILITADA else "Guardando devolución...",
@@ -3612,19 +3622,23 @@ def mostrar_ventana_entrega(nombre, matricula):
         wraplength=340
     ).pack(pady=(0, 25))
 
-    # Botón principal: su command se asigna una sola vez y no cambia durante
-    # ningún intento de devolución.
+    # El command existe desde que Tk crea el botón; nunca se reasigna durante
+    # un intento. La referencia diferida evita crear el botón sin callback.
+    referencia_boton = {"widget": None}
+    iniciar_devolucion = crear_control_devolucion(
+        ventana_entrega, matricula, nombre, referencia_boton
+    )
     btn_entregar = tk.Button(
         frame_principal,
         text="ENTREGAR Y APAGAR",
         padx=30,
         pady=15,
+        state="normal",
+        command=iniciar_devolucion,
         **estilo_boton("error")
     )
-    iniciar_devolucion = crear_control_devolucion(
-        ventana_entrega, matricula, nombre, btn_entregar
-    )
-    btn_entregar.config(command=iniciar_devolucion)
+    referencia_boton["widget"] = btn_entregar
+    registrar_evento_tecnico("DEVOLUCION_UI_LISTA estado=IDLE boton=normal")
     btn_entregar.pack(pady=20)
 
     tk.Label(

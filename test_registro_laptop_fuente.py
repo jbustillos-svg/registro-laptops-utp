@@ -105,7 +105,25 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn('boton.config(state="normal", text="ENTREGAR Y APAGAR")', entrega)
         self.assertIn('cambiar_estado("IDLE")', entrega)
         self.assertNotIn("command=", entrega)
-        self.assertIn("btn_entregar.config(command=iniciar_devolucion)", ventana_entrega)
+        self.assertIn('state="normal",', ventana_entrega)
+        self.assertIn("command=iniciar_devolucion,", ventana_entrega)
+        self.assertNotIn("btn_entregar.config(command=", ventana_entrega)
+        self.assertIn("DEVOLUCION_UI_LISTA estado=IDLE boton=normal", ventana_entrega)
+
+    def test_click_devolucion_registra_recepcion_antes_del_guard(self):
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        inicio = entrega.split("def iniciar_devolucion():", 1)[1].split(
+            "ventana._abortar_devolucion", 1
+        )[0]
+        self.assertIn("DEVOLUCION_CLICK_RECIBIDO estado=", inicio)
+        self.assertIn("DEVOLUCION_CLICK_IGNORADO motivo=ESTADO_NO_IDLE", inicio)
+        self.assertLess(
+            inicio.index("DEVOLUCION_CLICK_RECIBIDO estado="),
+            inicio.index('if estado["estado"] != "IDLE":'),
+        )
+        self.assertIn('cambiar_estado("VALIDANDO_PROXIMIDAD")', inicio)
 
     def test_identidad_offline_exige_el_verificador_curp_minimo_cacheado(self):
         consulta = self.fuente.split("def consultar_datos_identidad", 1)[1].split(
