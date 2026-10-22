@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.6"
+VERSION_SISTEMA = "1.4.7"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
@@ -3239,10 +3239,19 @@ def registrar_salida_con_reintentos(
 
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
-                                    modal_progreso, modo_contingencia=False):
+                                    modal_progreso, modo_contingencia=False,
+                                    boton_entrega=None):
     """Registra la salida actualizando el modal abierto de devolución."""
     ventana_espera, titulo_label, mensaje_label, estado_label = modal_progreso
-    estado_finalizacion = {"terminada": False, "watchdog": None}
+    # El watchdog se arma antes de tocar SQLite. Antes se iniciaba después de la
+    # transacción, así que una base bloqueada podía dejar el modal en
+    # "Guardando devolución..." sin salida posible.
+    estado_finalizacion = {
+        "terminada": False,
+        "cancelada": False,
+        "persistida": False,
+        "watchdog": None,
+    }
 
     def actualizar_progreso(estado):
         estado_label.config(text=estado)
@@ -3262,6 +3271,8 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
         if not sesion:
             return False
 
+        estado_finalizacion["persistida"] = True
+
         id_evento = sesion.get("devolucion_evento_id")
         if not id_evento:
             registrar_evento_tecnico(
@@ -3272,7 +3283,6 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
             actualizar_progreso,
             "Registrando entrega..."
         )
-        ejecutar_en_ui(iniciar_watchdog)
         registrar_evento_tecnico(
             f"DEVOLUCION_SYNC_INMEDIATA_INICIADA id={id_evento}"
         )
@@ -3284,7 +3294,7 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
         return True
 
     def apagar_una_vez(origen):
-        if estado_finalizacion["terminada"]:
+        if estado_finalizacion["terminada"] or estado_finalizacion["cancelada"]:
             return
         estado_finalizacion["terminada"] = True
         watchdog = estado_finalizacion.get("watchdog")
@@ -3302,21 +3312,49 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
     def iniciar_watchdog():
         if estado_finalizacion["terminada"]:
             return
-        estado_finalizacion["watchdog"] = ventana_entrega.after(
-            6000, lambda: apagar_una_vez("watchdog")
-        )
+        def resolver_timeout():
+            if estado_finalizacion["terminada"]:
+                return
+            if estado_finalizacion["persistida"]:
+                apagar_una_vez("watchdog")
+                return
+            # No se apaga una laptop si no hay evidencia durable de devolución.
+            # Se devuelve el control a la persona usuaria aunque el worker
+            # bloqueado llegue a terminar posteriormente.
+            registrar_evento_tecnico("DEVOLUCION_WATCHDOG_RECUPERA_UI motivo=SQLITE_NO_CONFIRMADA")
+            finalizar_registro(False)
+
+        estado_finalizacion["watchdog"] = ventana_entrega.after(6000, resolver_timeout)
 
     def finalizar_registro(exito):
+        if estado_finalizacion["cancelada"]:
+            return
         if exito:
             apagar_una_vez("sync")
         else:
+            estado_finalizacion["cancelada"] = True
+            watchdog = estado_finalizacion.get("watchdog")
+            if watchdog:
+                try:
+                    ventana_entrega.after_cancel(watchdog)
+                except tk.TclError:
+                    pass
             cerrar_modal_verificacion_ubicacion(ventana_espera)
+            if boton_entrega:
+                try:
+                    boton_entrega.config(state="normal", text="ENTREGAR Y APAGAR")
+                except tk.TclError:
+                    pass
             mostrar_error(
                 "Error",
                 "No se pudo registrar la salida.\n\n"
                 "La laptop no se apagará.\n"
                 "Por favor intenta nuevamente."
             )
+
+    # El límite cubre persistencia y POST; nunca puede quedar un modal de
+    # devolución esperando indefinidamente a un worker.
+    iniciar_watchdog()
 
     # Ejecutar en un hilo separado
     def ejecutar_registro():
@@ -3472,7 +3510,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
             # toma la sesión SQLite exacta, crea el UUID y la cierra primero.
             mostrar_ventana_espera_registro(
                 ventana, matricula, nombre, modal_progreso,
-                modo_contingencia=True
+                modo_contingencia=True, boton_entrega=boton
             )
 
         def comprobar_devolucion():
@@ -3513,7 +3551,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 )
                 mostrar_ventana_espera_registro(
                     ventana, matricula, nombre, modal_progreso,
-                    modo_contingencia=True
+                    modo_contingencia=True, boton_entrega=boton
                 )
                 return
             if estado != "ok":
@@ -3579,7 +3617,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     )
                     mostrar_ventana_espera_registro(
                         ventana, matricula, nombre, modal_progreso,
-                        modo_contingencia=True
+                        modo_contingencia=True, boton_entrega=boton
                     )
                     return
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
@@ -3619,7 +3657,8 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 return
 
             mostrar_ventana_espera_registro(
-                ventana, matricula, nombre, modal_progreso
+                ventana, matricula, nombre, modal_progreso,
+                boton_entrega=boton
             )
 
     if PROXIMIDAD_HABILITADA:

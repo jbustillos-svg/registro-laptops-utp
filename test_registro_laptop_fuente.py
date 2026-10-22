@@ -200,9 +200,23 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("reanudar=lambda: procesar_proximidad(", prestamo)
         self.assertIn("CURP_SOLICITADA", self.fuente)
         self.assertIn("FLUJO_RECUPERACION_SESION", self.fuente)
+        posicion_bypass = prestamo.index('"PRESTAMO_NUEVO"')
+        self.assertNotEqual(
+            prestamo.find("mostrar_confirmacion_simple(", posicion_bypass), -1
+        )
+        confirmacion = self.fuente.split("def mostrar_confirmacion_simple", 1)[1].split(
+            "def cambiar_estado", 1
+        )[0]
+        self.assertIn("iniciar_validacion_identidad()", confirmacion)
         self.assertIn("finalizar_devolucion_durable(", espera)
         self.assertIn("DEVOLUCION_SYNC_INMEDIATA_INICIADA", espera)
         self.assertIn("DEVOLUCION_WATCHDOG_APAGADO", espera)
+        self.assertIn("DEVOLUCION_WATCHDOG_RECUPERA_UI", espera)
+        self.assertLess(
+            espera.index("iniciar_watchdog()\n\n    # Ejecutar en un hilo separado"),
+            espera.index("threading.Thread(target=ejecutar_registro, daemon=True).start()"),
+        )
+        self.assertIn('boton_entrega.config(state="normal", text="ENTREGAR Y APAGAR")', espera)
         self.assertIn("6000", espera)
 
     def test_bypass_admin_devolucion_reanuda_la_misma_entrega_durable(self):
