@@ -496,8 +496,14 @@ function aplicarNoEntrega_(alumnos, registros, filaRegistro, evento) {
     valueInputOption: 'RAW',
     data: [
       {
-        range: HOJA_REGISTROS + '!E' + filaRegistro + ':G' + filaRegistro,
-        values: [['-----', '', 'NO_ENTREGA_CONTADA']]
+        // Sólo se actualizan Hora_Salida y Observación. Laptop_ID (F) debe
+        // conservar la laptop original del préstamo.
+        range: HOJA_REGISTROS + '!E' + filaRegistro,
+        values: [['-----']]
+      },
+      {
+        range: HOJA_REGISTROS + '!G' + filaRegistro,
+        values: [['NO_ENTREGA_CONTADA']]
       },
       {
         range: HOJA_ALUMNOS + '!E' + filaAlumno,

@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.9"
+VERSION_SISTEMA = "1.4.10"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
@@ -3363,14 +3363,27 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         # El command se configura una única vez al crear el botón y nunca se
         # reemplaza durante el intento.
         cambiar_estado("IDLE")
+        if motivo in ("ERROR_PERSISTENCIA", "TIMEOUT_PERSISTENCIA"):
+            mostrar_error(
+                "Devolución no registrada",
+                "No fue posible registrar la devolución.\n\nInténtelo nuevamente.",
+                parent=ventana,
+            )
 
-    def finalizar_devolucion():
+    def finalizar_devolucion(sincronizacion_pendiente=False):
         if estado["estado"] != "SINCRONIZANDO":
             return
         cancelar_timers()
         cambiar_estado("FINALIZADA")
         registrar_evento_tecnico("DEVOLUCION_FINALIZADA")
         cerrar_modal()
+        if sincronizacion_pendiente:
+            mostrar_informacion(
+                "Devolución guardada",
+                "La devolución quedó guardada.\n\n"
+                "Se sincronizará automáticamente.",
+                parent=ventana,
+            )
         try:
             ventana.destroy()
         except tk.TclError:
@@ -3378,13 +3391,13 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         apagar_windows()
 
     def watchdog_pre_durable():
-        if estado["estado"] in ("VALIDANDO_PROXIMIDAD", "PERSISTIENDO_LOCAL"):
-            abortar_devolucion("TIMEOUT_PRE_DURABLE")
+        if estado["estado"] == "PERSISTIENDO_LOCAL":
+            abortar_devolucion("TIMEOUT_PERSISTENCIA")
 
     def watchdog_post_durable():
         if estado["estado"] == "SINCRONIZANDO":
             registrar_evento_tecnico("DEVOLUCION_WATCHDOG_APAGADO")
-            finalizar_devolucion()
+            finalizar_devolucion(sincronizacion_pendiente=True)
 
     def iniciar_sincronizacion(id_evento):
         if estado["estado"] != "PERSISTIENDO_LOCAL":
@@ -3400,13 +3413,13 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 registrar_evento_tecnico(
                     "DEVOLUCION_SYNC_APLICADA" if aplicada else "DEVOLUCION_SYNC_PENDIENTE"
                 )
-                ejecutar_en_ui_devolucion(finalizar_devolucion)
+                ejecutar_en_ui_devolucion(finalizar_devolucion, not aplicada)
             except Exception as error:
                 registrar_evento_tecnico(
                     f"DEVOLUCION_SYNC_ERROR tipo={type(error).__name__}"
                 )
                 # SQLite ya confirmó: el evento queda pendiente y se apaga.
-                ejecutar_en_ui_devolucion(finalizar_devolucion)
+                ejecutar_en_ui_devolucion(finalizar_devolucion, True)
 
         threading.Thread(target=worker_sincronizacion, daemon=True).start()
 
@@ -3414,11 +3427,11 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         if estado["estado"] != "PERSISTIENDO_LOCAL":
             return
         if not sesion:
-            abortar_devolucion("SQLITE_NO_CONFIRMADA")
+            abortar_devolucion("ERROR_PERSISTENCIA")
             return
         id_evento = sesion.get("devolucion_evento_id")
         if not id_evento:
-            abortar_devolucion("EVENTO_DEVOLUCION_AUSENTE")
+            abortar_devolucion("ERROR_PERSISTENCIA")
             return
         # finalizar_devolucion_durable sólo retorna tras cerrar el id_sesion
         # exacto y dejar el UUID de DEVOLUCION en SQLite.
@@ -3434,7 +3447,7 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
             registrar_evento_tecnico(
                 f"DEVOLUCION_PERSISTENCIA_ERROR tipo={type(error).__name__}"
             )
-            ejecutar_en_ui_devolucion(abortar_devolucion, "ERROR_ANTES_DE_SQLITE")
+            ejecutar_en_ui_devolucion(abortar_devolucion, "ERROR_PERSISTENCIA")
 
     def iniciar_persistencia(autorizacion_administrativa=False, estado_proximidad=None):
         if estado["estado"] != "VALIDANDO_PROXIMIDAD":
@@ -3454,6 +3467,9 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 "Guardando devolución...",
             )
             registrar_evento_tecnico("DEVOLUCION_DURABLE_PIPELINE_INICIADO")
+            # Este watchdog mide exclusivamente SQLite; la interacción humana
+            # de proximidad y contraseña administrativa no tiene límite aquí.
+            estado["timers"]["pre_durable"] = ventana.after(5000, watchdog_pre_durable)
             threading.Thread(target=persistir_devolucion, daemon=True).start()
         except Exception as error:
             registrar_evento_tecnico(
@@ -3465,6 +3481,11 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         proximidad_valida, estado_proximidad, autorizacion_administrativa=False
     ):
         if estado["estado"] != "VALIDANDO_PROXIMIDAD":
+            if autorizacion_administrativa:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_IGNORADO "
+                    f"estado={estado['estado']}"
+                )
             return
         try:
             if proximidad_valida:
@@ -3498,9 +3519,9 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 )
                 return
             if not permite_contingencia:
-                abortar_devolucion("PROXIMIDAD_NO_AUTORIZADA")
+                abortar_devolucion("PROXIMIDAD_CANCELADA")
                 return
-            abortar_devolucion("PROXIMIDAD_NO_AUTORIZADA")
+            abortar_devolucion("PROXIMIDAD_CANCELADA")
         except Exception as error:
             registrar_evento_tecnico(
                 f"DEVOLUCION_PROXIMIDAD_ERROR tipo={type(error).__name__}"
@@ -3539,7 +3560,6 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 ventana,
                 "Asegúrate de estar cerca del carrito para continuar con la devolución.",
             )[0]
-            estado["timers"]["pre_durable"] = ventana.after(5000, watchdog_pre_durable)
             if PROXIMIDAD_HABILITADA:
                 threading.Thread(target=worker_proximidad, daemon=True).start()
             else:

@@ -26,6 +26,15 @@ class PruebasFuenteAppsScript(unittest.TestCase):
     def test_no_entrega_usa_batch_atomico(self):
         self.assertIn("Sheets.Spreadsheets.Values.batchUpdate", self.fuente)
 
+    def test_no_entrega_conserva_laptop_id(self):
+        bloque = self.fuente.split("function aplicarNoEntrega_", 1)[1].split(
+            "function fechaHoraEvento_", 1
+        )[0]
+        self.assertIn("'!E' + filaRegistro", bloque)
+        self.assertIn("'!G' + filaRegistro", bloque)
+        self.assertNotIn("'!E' + filaRegistro + ':G' + filaRegistro", bloque)
+        self.assertNotIn("['-----', '', 'NO_ENTREGA_CONTADA']", bloque)
+
     def test_secreto_solo_se_resuelve_desde_script_properties(self):
         self.assertIn("getScriptProperties().getProperty('UTP_SYNC_API_KEY')", self.fuente)
         self.assertNotIn("UTP_SYNC_API_KEY =", self.fuente)
