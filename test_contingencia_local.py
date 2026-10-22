@@ -238,6 +238,60 @@ class PruebasContingenciaLocal(unittest.TestCase):
             1,
         )
 
+    def test_residual_con_devolucion_durable_se_cierra_y_permite_prestamo_nuevo(self):
+        self.almacen.inicializar()
+        anterior = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        cerrada = self.almacen.registrar_devolucion_offline(
+            "A1", "LAP-1", "2026-10-16", "10:00:00"
+        )
+        # Simula la interrupción que dejó la fila local abierta aunque el UUID
+        # durable de DEVOLUCION sí existe.
+        with self.almacen._conexion() as conexion:
+            conexion.execute(
+                "UPDATE sesiones_locales SET hora_salida = NULL WHERE id_sesion = ?",
+                (anterior["id_sesion"],),
+            )
+        self.assertTrue(
+            self.almacen.reconciliar_sesion_residual_local(anterior["id_sesion"])
+        )
+        self.assertIsNone(self.almacen.obtener_sesion_activa("LAP-1"))
+        nuevo = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "11:00:00"
+        )
+        self.assertFalse(nuevo["sesion_existente"])
+        self.assertEqual(
+            self.almacen.obtener_evento(cerrada["devolucion_evento_id"])["tipo_evento"],
+            "DEVOLUCION",
+        )
+
+    def test_residual_sin_evidencia_durable_permanece_activa(self):
+        self.almacen.inicializar()
+        sesion = self.almacen.registrar_prestamo_offline(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        self.assertFalse(self.almacen.reconciliar_sesion_residual_local(sesion["id_sesion"]))
+        self.assertEqual(
+            self.almacen.obtener_sesion_activa("LAP-1")["id_sesion"], sesion["id_sesion"]
+        )
+
+    def test_residual_remota_con_hora_salida_se_cierra_y_permite_prestamo_nuevo(self):
+        self.almacen.inicializar()
+        anterior = self.almacen.registrar_prestamo_online(
+            "A1", "Ana", "LAP-1", "2026-10-16", "09:00:00"
+        )
+        self.assertTrue(
+            self.almacen.cerrar_sesion_residual_remota(
+                anterior["id_sesion"], "10:00:00"
+            )
+        )
+        self.assertIsNone(self.almacen.obtener_sesion_activa("LAP-1"))
+        nuevo = self.almacen.registrar_prestamo_coordinador(
+            "A1", "Ana", "LAP-1", "2026-10-16", "11:00:00"
+        )
+        self.assertFalse(nuevo["sesion_existente"])
+
     def test_reconcilia_cierre_remoto_aplicado_antes_de_nuevo_prestamo(self):
         self.almacen.inicializar()
         anterior = self.almacen.registrar_prestamo_coordinador(

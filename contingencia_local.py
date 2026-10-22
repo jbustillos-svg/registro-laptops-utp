@@ -414,6 +414,54 @@ class ContingenciaLocal:
                 sesion["prestamo_sincronizado"] = True
         return sesion
 
+    def reconciliar_sesion_residual_local(self, id_sesion):
+        """Cierra una fila residual si su DEVOLUCION ya quedó durable localmente."""
+        with self._conexion() as conexion:
+            conexion.execute("BEGIN IMMEDIATE")
+            try:
+                sesion = conexion.execute(
+                    "SELECT * FROM sesiones_locales WHERE id_sesion = ?", (id_sesion,)
+                ).fetchone()
+                if not sesion or sesion["hora_salida"] or not sesion["devolucion_evento_id"]:
+                    conexion.commit()
+                    return False
+                evento = conexion.execute(
+                    """
+                    SELECT hora_evento FROM eventos_pendientes
+                    WHERE id_evento = ? AND tipo_evento = 'DEVOLUCION'
+                    """,
+                    (sesion["devolucion_evento_id"],),
+                ).fetchone()
+                if not evento:
+                    conexion.commit()
+                    return False
+                conexion.execute(
+                    """
+                    UPDATE sesiones_locales
+                    SET hora_salida = ?, fecha_actualizacion = ?
+                    WHERE id_sesion = ? AND hora_salida IS NULL
+                    """,
+                    (evento["hora_evento"], self._ahora(), id_sesion),
+                )
+                conexion.commit()
+                return True
+            except Exception:
+                conexion.rollback()
+                raise
+
+    def cerrar_sesion_residual_remota(self, id_sesion, hora_salida):
+        """Refleja un cierre ya confirmado en Sheets sin crear otro evento."""
+        with self._conexion() as conexion:
+            cursor = conexion.execute(
+                """
+                UPDATE sesiones_locales
+                SET hora_salida = ?, fecha_actualizacion = ?
+                WHERE id_sesion = ? AND hora_salida IS NULL
+                """,
+                (hora_salida, self._ahora(), id_sesion),
+            )
+        return bool(cursor.rowcount)
+
     def registrar_prestamo_online(self, matricula, nombre, laptop_id, fecha_entrada,
                                   hora_entrada):
         """Persiste la sesión confirmada por Sheets para una devolución posterior offline."""

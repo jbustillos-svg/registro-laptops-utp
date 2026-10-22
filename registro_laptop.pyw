@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.7"
+VERSION_SISTEMA = "1.4.8"
 MODO_PRUEBA = False
 PROXIMIDAD_HABILITADA = True
 hoja_alumnos = None
@@ -3273,7 +3273,8 @@ def registrar_salida_con_reintentos(
 
 def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
                                     modal_progreso, modo_contingencia=False,
-                                    boton_entrega=None):
+                                    boton_entrega=None, restaurar_estado=None,
+                                    marcar_durable=None):
     """Registra la salida actualizando el modal abierto de devolución."""
     ventana_espera, titulo_label, mensaje_label, estado_label = modal_progreso
     # El watchdog se arma antes de tocar SQLite. Antes se iniciaba después de la
@@ -3305,6 +3306,8 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
             return False
 
         estado_finalizacion["persistida"] = True
+        if marcar_durable:
+            marcar_durable()
 
         id_evento = sesion.get("devolucion_evento_id")
         if not id_evento:
@@ -3373,7 +3376,9 @@ def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
                 except tk.TclError:
                     pass
             cerrar_modal_verificacion_ubicacion(ventana_espera)
-            if boton_entrega:
+            if restaurar_estado and not estado_finalizacion["persistida"]:
+                restaurar_estado("FALLO_ANTES_DE_SQLITE")
+            elif boton_entrega and not estado_finalizacion["persistida"]:
                 try:
                     boton_entrega.config(state="normal", text="ENTREGAR Y APAGAR")
                 except tk.TclError:
@@ -3405,6 +3410,21 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
         print("[DEVOLUCION] cancelada: botón no disponible")
         return
 
+    estado_devolucion = getattr(ventana, "_estado_devolucion", None)
+    if estado_devolucion is None:
+        estado_devolucion = {
+            "en_proceso": False,
+            "durable": False,
+            "afters": [],
+            "modal": None,
+            "comando": boton.cget("command"),
+        }
+        ventana._estado_devolucion = estado_devolucion
+    if estado_devolucion["en_proceso"] or estado_devolucion["durable"]:
+        registrar_evento_tecnico("DEVOLUCION_CLIC_IGNORADO motivo=EN_PROCESO_O_DURABLE")
+        return
+    estado_devolucion["en_proceso"] = True
+
     if boton:
         boton.config(
             state="disabled",
@@ -3429,26 +3449,50 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
             )
         print("[DEVOLUCION] modal creado")
         ventana_ubicacion, titulo_ubicacion, mensaje_ubicacion, estado_ubicacion = modal_progreso
+        estado_devolucion["modal"] = ventana_ubicacion
         proximidad_visual_activa = {"valor": True}
         inicio_durable = {"iniciado": False}
         contexto_devolucion = {"valor": None}
 
-        def restaurar_bypass_devolucion(motivo="CALLBACK_NO_INICIO_DURABLE"):
-            """Devuelve el control si el callback administrativo no llega a SQLite."""
-            if inicio_durable["iniciado"]:
+        def restaurar_estado_devolucion(motivo="FALLO_ANTES_DE_SQLITE"):
+            """Limpia completamente un intento que no alcanzó SQLite."""
+            if estado_devolucion["durable"]:
                 return
             registrar_evento_tecnico(
-                f"DEVOLUCION_TRANSICION_RECUPERADA motivo={motivo}"
+                f"DEVOLUCION_ESTADO_RESTAURADO motivo={motivo}"
             )
+            for after_id in estado_devolucion["afters"]:
+                try:
+                    ventana.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+            estado_devolucion["afters"].clear()
+            contexto = contexto_devolucion["valor"]
+            if contexto and contexto.get("guard_bypass"):
+                try:
+                    ventana.after_cancel(contexto["guard_bypass"])
+                except tk.TclError:
+                    pass
+                contexto["guard_bypass"] = None
+            inicio_durable["iniciado"] = False
+            estado_devolucion["en_proceso"] = False
+            estado_devolucion["modal"] = None
             if boton:
                 try:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
+                    boton.config(
+                        state="normal",
+                        text="ENTREGAR Y APAGAR",
+                        command=estado_devolucion["comando"],
+                    )
                 except tk.TclError:
                     pass
             try:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
             except (AttributeError, tk.TclError):
                 pass
+
+        def marcar_devolucion_durable():
+            estado_devolucion["durable"] = True
 
         def iniciar_devolucion_durable(autorizacion_administrativa=False):
             """Única continuación productiva para proximidad normal y bypass."""
@@ -3506,7 +3550,9 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 registrar_evento_tecnico("DEVOLUCION_DURABLE_PIPELINE_INICIADO")
                 mostrar_ventana_espera_registro(
                     ventana, matricula, nombre, modal_progreso,
-                    modo_contingencia=True, boton_entrega=boton
+                    modo_contingencia=True, boton_entrega=boton,
+                    restaurar_estado=restaurar_estado_devolucion,
+                    marcar_durable=marcar_devolucion_durable,
                 )
             except Exception as error:
                 inicio_durable["iniciado"] = False
@@ -3514,7 +3560,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     "DEVOLUCION_TRANSICION_ERROR "
                     f"tipo={type(error).__name__}"
                 )
-                restaurar_bypass_devolucion("ERROR_ANTES_DE_SQLITE")
+                restaurar_estado_devolucion("ERROR_ANTES_DE_SQLITE")
 
         def reanudar_devolucion_administrativa():
             iniciar_devolucion_durable(autorizacion_administrativa=True)
@@ -3567,7 +3613,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     matricula,
                     ventana,
                     reanudar=reanudar_devolucion_administrativa,
-                    recuperar_bypass=restaurar_bypass_devolucion,
+                    recuperar_bypass=restaurar_estado_devolucion,
                 )
                 contexto_devolucion["valor"] = contexto
                 if not permite_contingencia:
@@ -3604,8 +3650,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
                 if permite_contingencia:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
+                restaurar_estado_devolucion("PROXIMIDAD_NO_AUTORIZADA")
                 return
 
             iniciar_devolucion_durable(autorizacion_administrativa)
@@ -3648,13 +3693,14 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                 )
                 mostrar_ventana_espera_registro(
                     ventana, matricula, nombre, modal_progreso,
-                    modo_contingencia=True, boton_entrega=boton
+                    modo_contingencia=True, boton_entrega=boton,
+                    restaurar_estado=restaurar_estado_devolucion,
+                    marcar_durable=marcar_devolucion_durable
                 )
                 return
             if estado != "ok":
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
+                restaurar_estado_devolucion("VERIFICACION_REMOTA_FALLIDA")
                 if estado == "sin_internet":
                     mostrar_error(
                         "Sin acceso a Internet",
@@ -3714,12 +3760,13 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     )
                     mostrar_ventana_espera_registro(
                         ventana, matricula, nombre, modal_progreso,
-                        modo_contingencia=True, boton_entrega=boton
+                        modo_contingencia=True, boton_entrega=boton,
+                        restaurar_estado=restaurar_estado_devolucion,
+                        marcar_durable=marcar_devolucion_durable,
                     )
                     return
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
+                restaurar_estado_devolucion("SESION_NO_ENCONTRADA")
                 mostrar_error(
                     "Error",
                     "No se encontró una sesión en esta laptop.",
@@ -3755,7 +3802,9 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
 
             mostrar_ventana_espera_registro(
                 ventana, matricula, nombre, modal_progreso,
-                boton_entrega=boton
+                boton_entrega=boton,
+                restaurar_estado=restaurar_estado_devolucion,
+                marcar_durable=marcar_devolucion_durable,
             )
 
     if PROXIMIDAD_HABILITADA:
@@ -3852,11 +3901,16 @@ def mostrar_ventana_entrega(nombre, matricula):
         except Exception:
             print("[DEVOLUCION] excepción al iniciar la devolución")
             traceback.print_exc()
+            estado = getattr(ventana_entrega, "_estado_devolucion", None)
+            if estado and not estado.get("durable"):
+                estado["en_proceso"] = False
+                estado["modal"] = None
             try:
                 if btn_entregar.winfo_exists():
                     btn_entregar.config(
                         state="normal",
-                        text="ENTREGAR Y APAGAR"
+                        text="ENTREGAR Y APAGAR",
+                        command=iniciar_devolucion_desde_boton,
                     )
             except tk.TclError:
                 pass
@@ -3948,6 +4002,27 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
     return False, None
 
 
+def reconciliar_sesion_residual_remota(sesion):
+    """Confirma si la misma sesión local ya tiene Hora_Salida en Sheets."""
+    if hoja_registros is None:
+        return None
+    try:
+        for fila in reversed(hoja_registros.get_all_values()):
+            if len(fila) <= COL_OBSERVACION:
+                continue
+            if (
+                str(fila[COL_MATRICULA]).strip() == str(sesion["matricula"]).strip()
+                and str(fila[COL_LAPTOP_ID]).strip() == str(sesion["laptop_id"]).strip()
+                and str(fila[COL_FECHA]).strip() == str(sesion["fecha_entrada"]).strip()
+                and str(fila[COL_HORA_INGRESO]).strip() == str(sesion["hora_entrada"]).strip()
+                and str(fila[COL_HORA_SALIDA]).strip()
+            ):
+                return str(fila[COL_HORA_SALIDA]).strip()
+    except Exception as error:
+        raise ErrorConsultaGoogle("No se pudo reconciliar la sesión residual") from error
+    return None
+
+
 def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
                                 modo_contingencia=False, persona_cache=None):
     global entrada, ventana, procesando_sesion
@@ -3981,6 +4056,35 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
         if not previa:
             ejecutar_en_ui(procesar_sesion_local, "sin_sesion", None)
             return
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_DETECTADA id_sesion={previa['id_sesion']}"
+        )
+        try:
+            if almacen_contingencia.reconciliar_sesion_residual_local(
+                previa["id_sesion"]
+            ):
+                registrar_evento_tecnico(
+                    f"SESION_RESIDUAL_RECONCILIADA origen=LOCAL id_sesion={previa['id_sesion']}"
+                )
+                ejecutar_en_ui(procesar_sesion_local, "residual_reconciliada", previa)
+                return
+            # En contingencia no se adivina el estado remoto: una fila sin
+            # evidencia local de cierre sigue siendo una sesión recuperable.
+            if not modo_contingencia:
+                hora_salida = reconciliar_sesion_residual_remota(previa)
+                if hora_salida and almacen_contingencia.cerrar_sesion_residual_remota(
+                    previa["id_sesion"], hora_salida
+                ):
+                    registrar_evento_tecnico(
+                        f"SESION_RESIDUAL_RECONCILIADA origen=REMOTO id_sesion={previa['id_sesion']}"
+                    )
+                    ejecutar_en_ui(procesar_sesion_local, "residual_reconciliada", previa)
+                    return
+        except ErrorConsultaGoogle:
+            # Sin evidencia suficiente se conserva la recuperación segura.
+            registrar_evento_tecnico(
+                f"SESION_RESIDUAL_SIN_CONFIRMACION id_sesion={previa['id_sesion']}"
+            )
         if previa["matricula"] == str(matricula).strip():
             ejecutar_en_ui(procesar_sesion_local, "misma_matricula", previa)
             return
@@ -3997,6 +4101,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             registrar_evento_tecnico(
                 f"FLUJO_RECUPERACION_SESION id_sesion={sesion['id_sesion']}"
             )
+            registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=RECUPERACION_SESION")
             procesando_sesion = False
             ventana.withdraw()
             ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
@@ -4008,6 +4113,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
             )
             reiniciar_estado_sistema()
             return
+        registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO")
         iniciar_validacion_identidad()
 
     def procesar_sesion(resultado_consulta, sesion_activa, laptop_otro):

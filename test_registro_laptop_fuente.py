@@ -48,6 +48,33 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("RECUPERACION_SESION_LOCAL resultado=MISMA_MATRICULA", self.fuente)
         self.assertIn("lambda: mostrar_ventana_entrega(nombre, matricula)", self.fuente)
 
+    def test_sesion_residual_se_reconcilia_antes_de_elegir_flujo(self):
+        seleccion = self.fuente.split("def mostrar_confirmacion_simple", 1)[1].split(
+            "def cambiar_estado", 1
+        )[0]
+        self.assertIn("SESION_RESIDUAL_DETECTADA", seleccion)
+        self.assertIn("reconciliar_sesion_residual_local", seleccion)
+        self.assertIn("reconciliar_sesion_residual_remota", seleccion)
+        self.assertIn("SESION_RESIDUAL_RECONCILIADA origen=LOCAL", seleccion)
+        self.assertIn("SESION_RESIDUAL_RECONCILIADA origen=REMOTO", seleccion)
+        self.assertIn("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO", seleccion)
+        self.assertIn("FLUJO_SELECCIONADO tipo=RECUPERACION_SESION", seleccion)
+        self.assertLess(
+            seleccion.index("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO"),
+            seleccion.index("iniciar_validacion_identidad()"),
+        )
+
+    def test_devolucion_restauracion_limpia_estado_antes_de_sqlite(self):
+        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        self.assertIn("def restaurar_estado_devolucion(", entrega)
+        self.assertIn('estado_devolucion["en_proceso"] = False', entrega)
+        self.assertIn('estado_devolucion["afters"].clear()', entrega)
+        self.assertIn('command=estado_devolucion["comando"]', entrega)
+        self.assertIn("DEVOLUCION_CLIC_IGNORADO motivo=EN_PROCESO_O_DURABLE", entrega)
+        self.assertIn("marcar_durable=marcar_devolucion_durable", entrega)
+
     def test_matricula_diferente_resuelve_sesion_por_sqlite_y_apps_script(self):
         self.assertIn("cerrar_sesion_contingencia_por_nueva_sesion(matricula)", self.fuente)
         self.assertIn("resolver_sesion_activa_por_nueva_matricula(", self.fuente)
