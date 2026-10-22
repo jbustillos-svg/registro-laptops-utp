@@ -69,16 +69,21 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
             seleccion.index("iniciar_validacion_identidad()"),
         )
 
-    def test_devolucion_restauracion_limpia_estado_antes_de_sqlite(self):
-        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+    def test_devolucion_usa_una_maquina_de_estados_y_aborto_unico(self):
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
             "def mostrar_ventana_entrega", 1
         )[0]
-        self.assertIn("def restaurar_estado_devolucion(", entrega)
-        self.assertIn('estado_devolucion["en_proceso"] = False', entrega)
-        self.assertIn('estado_devolucion["afters"].clear()', entrega)
-        self.assertIn('command=estado_devolucion["comando"]', entrega)
-        self.assertIn("DEVOLUCION_CLIC_IGNORADO motivo=EN_PROCESO_O_DURABLE", entrega)
-        self.assertIn("marcar_durable=marcar_devolucion_durable", entrega)
+        for estado in (
+            "IDLE", "VALIDANDO_PROXIMIDAD", "PERSISTIENDO_LOCAL",
+            "SINCRONIZANDO", "FINALIZADA", "ERROR_RECUPERABLE",
+        ):
+            self.assertIn(estado, entrega)
+        self.assertIn("def iniciar_devolucion():", entrega)
+        self.assertIn("def abortar_devolucion(motivo):", entrega)
+        self.assertIn('boton.config(state="normal", text="ENTREGAR Y APAGAR")', entrega)
+        self.assertIn('cambiar_estado("IDLE")', entrega)
+        self.assertNotIn('estado["en_proceso"]', entrega)
+        self.assertNotIn('estado["durable"]', entrega)
 
     def test_matricula_diferente_resuelve_sesion_por_sqlite_y_apps_script(self):
         self.assertIn("cerrar_sesion_contingencia_por_nueva_sesion(matricula)", self.fuente)
@@ -89,6 +94,18 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
     def test_devolucion_normal_sigue_disponible(self):
         self.assertIn("def mostrar_ventana_entrega(nombre, matricula):", self.fuente)
         self.assertIn('text="ENTREGAR Y APAGAR"', self.fuente)
+
+    def test_boton_entrega_conserva_una_sola_entrada_despues_de_aborto(self):
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        ventana_entrega = self.fuente.split("def mostrar_ventana_entrega", 1)[1].split(
+            "def formatear_fecha", 1
+        )[0]
+        self.assertIn('boton.config(state="normal", text="ENTREGAR Y APAGAR")', entrega)
+        self.assertIn('cambiar_estado("IDLE")', entrega)
+        self.assertNotIn("command=", entrega)
+        self.assertIn("btn_entregar.config(command=iniciar_devolucion)", ventana_entrega)
 
     def test_identidad_offline_exige_el_verificador_curp_minimo_cacheado(self):
         consulta = self.fuente.split("def consultar_datos_identidad", 1)[1].split(
@@ -156,7 +173,7 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
 
     def test_devolucion_durable_solicita_cola_sin_esperar_post(self):
         salida = self.fuente.split("def registrar_salida_con_reintentos(", 1)[1].split(
-            "def mostrar_ventana_espera_registro", 1
+            "def crear_control_devolucion", 1
         )[0]
         self.assertIn("registrar_devolucion_offline(", salida)
         self.assertIn("enviar_evento_local_inmediato(id_evento)", salida)
@@ -202,31 +219,27 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn('os.system("shutdown /s /t 3")', apagado)
 
     def test_entrega_guarda_antes_de_sincronizar_y_apagar_sin_doble_worker(self):
-        espera = self.fuente.split("def mostrar_ventana_espera_registro(", 1)[1].split(
-            "def entregar_y_apagar", 1
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
         )[0]
-        self.assertIn("solicitar_sincronizacion=False", espera)
-        self.assertIn('"Registrando entrega..."', espera)
-        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
-        self.assertNotIn("time.sleep(", espera)
-        self.assertLess(
-            espera.index("finalizar_devolucion_durable("),
-            espera.index("sincronizar_devolucion_pre_apagado(id_evento)"),
-        )
-        self.assertLess(
-            espera.index("sincronizar_devolucion_pre_apagado(id_evento)"),
-            espera.index("apagar_windows()"),
-        )
-        self.assertIn("if exito:", espera)
-        self.assertIn("if not sesion:\n            return False", espera)
-        self.assertIn("state=\"disabled\"", self.fuente)
+        self.assertIn("solicitar_sincronizacion=False", entrega)
+        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", entrega)
+        self.assertNotIn("time.sleep(", entrega)
+        persistencia = entrega.split("def persistir_devolucion():", 1)[1].split(
+            "def iniciar_persistencia", 1
+        )[0]
+        self.assertIn("finalizar_devolucion_durable(", persistencia)
+        self.assertIn("ejecutar_en_ui_devolucion(procesar_persistencia, sesion)", persistencia)
+        self.assertIn("def finalizar_devolucion():", entrega)
+        self.assertIn("apagar_windows()", entrega)
+        self.assertIn('state="disabled"', entrega)
 
     def test_prestamo_bypass_reanuda_curp_y_devolucion_tiene_watchdog(self):
         prestamo = self.fuente.split("def iniciar_sesion", 1)[1].split(
             "def crear_pantalla_login", 1
         )[0]
-        espera = self.fuente.split("def mostrar_ventana_espera_registro", 1)[1].split(
-            "def entregar_y_apagar", 1
+        espera = self.fuente.split("def crear_control_devolucion", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
         )[0]
         self.assertIn('"PRESTAMO_NUEVO"', prestamo)
         self.assertIn("reanudar=lambda: procesar_proximidad(", prestamo)
@@ -242,43 +255,32 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("finalizar_devolucion_durable(", espera)
         self.assertIn("DEVOLUCION_SYNC_INMEDIATA_INICIADA", espera)
         self.assertIn("DEVOLUCION_WATCHDOG_APAGADO", espera)
-        self.assertIn("DEVOLUCION_WATCHDOG_RECUPERA_UI", espera)
-        self.assertLess(
-            espera.index("iniciar_watchdog()\n\n    # Ejecutar en un hilo separado"),
-            espera.index("threading.Thread(target=ejecutar_registro, daemon=True).start()"),
-        )
-        self.assertIn('boton_entrega.config(state="normal", text="ENTREGAR Y APAGAR")', espera)
+        self.assertIn("TIMEOUT_PRE_DURABLE", espera)
+        self.assertIn("watchdog_pre_durable", espera)
+        self.assertIn('boton.config(state="normal", text="ENTREGAR Y APAGAR")', espera)
         self.assertIn("6000", espera)
 
     def test_bypass_admin_devolucion_reanuda_la_misma_entrega_durable(self):
         """LEJOS + CtrlAltU no puede depender del retorno de wait_window."""
-        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
             "def mostrar_ventana_entrega", 1
         )[0]
         bypass = self.fuente.split("def _autorizar_bypass_proximidad", 1)[1].split(
             "def _solicitar_contingencia_proximidad", 1
         )[0]
-        espera = self.fuente.split("def mostrar_ventana_espera_registro", 1)[1].split(
-            "def entregar_y_apagar", 1
-        )[0]
-
         self.assertIn('"DEVOLUCION"', entrega)
-        self.assertIn("def iniciar_devolucion_durable(", entrega)
-        self.assertIn("reanudar=reanudar_devolucion_administrativa", entrega)
-        self.assertIn("iniciar_devolucion_durable(autorizacion_administrativa=True)", entrega)
+        self.assertIn("def iniciar_persistencia(", entrega)
+        self.assertIn("reanudar=lambda: procesar_resultado_proximidad(", entrega)
+        self.assertIn("autorizacion_administrativa=True", entrega)
         self.assertIn("DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN", entrega)
-        self.assertIn("if not _widget_tk_vivo(ventana_ubicacion):", entrega)
         self.assertIn("DEVOLUCION_DURABLE_PIPELINE_INICIADO", entrega)
         self.assertIn('if contexto.get("reanudado"):', entrega)
         self.assertIn("parent.after_idle(reanudar)", bypass)
         self.assertIn("contexto[\"reanudado\"] = True", bypass)
-        self.assertIn("DEVOLUCION_BYPASS_CONTINUACION_TIMEOUT", bypass)
-        self.assertIn("finalizar_devolucion_durable(", espera)
-        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
-        self.assertLess(
-            espera.index("finalizar_devolucion_durable("),
-            espera.index("apagar_windows()"),
-        )
+        self.assertIn("finalizar_devolucion_durable(", entrega)
+        self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", entrega)
+        self.assertIn("iniciar_sincronizacion(id_evento)", entrega)
+        self.assertIn("def finalizar_devolucion():", entrega)
 
     def test_callback_bypass_reanuda_una_sola_devolucion_sin_wait_window(self):
         modulo = self._funciones_ast(
@@ -649,63 +651,27 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         self.assertIn("PROXIMIDAD_BYPASS_ADMIN_AUTORIZADO estado=LEJOS", eventos)
 
     def test_bypass_reanuda_prestamo_y_devolucion_sin_duplicar_sesion(self):
-        self.assertEqual(self.fuente.count("if contingencia_autorizada:"), 2)
-        self.assertEqual(self.fuente.count("procesar_resultado_proximidad(True, None)"), 1)
         self.assertIn("reanudar=lambda: procesar_proximidad(", self.fuente)
         self.assertIn("mostrar_confirmacion_simple(", self.fuente)
-        entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
             "def mostrar_ventana_entrega", 1
         )[0]
-        ruta_durable = entrega.split("def iniciar_devolucion_durable", 1)[1].split(
-            "def comprobar_devolucion", 1
-        )[0]
-        self.assertIn("mostrar_ventana_espera_registro(", ruta_durable)
-        self.assertNotIn("verificar_sheets_con_reintentos", ruta_durable)
+        self.assertIn("def iniciar_persistencia(", entrega)
+        self.assertIn("def procesar_resultado_proximidad(", entrega)
+        self.assertNotIn("verificar_sheets_con_reintentos", entrega)
         solicitud = self.fuente.split("def _solicitar_contingencia_proximidad", 1)[1].split(
             "def _solicitar_salida_administrativa", 1
         )[0]
         self.assertIn('accion="CONTINUAR_SIN_PROXIMIDAD"', solicitud)
         self.assertIn("al_autorizar=lambda: _autorizar_bypass_proximidad(contexto)", solicitud)
 
-    def test_bypass_devolucion_sin_callback_recupera_la_ui(self):
-        modulo = self._funciones_ast(
-            "iniciar_contexto_contingencia", "_autorizar_bypass_proximidad"
-        )
-        eventos, recuperaciones = [], []
-
-        class ParentFalso:
-            def __init__(self):
-                self.pendientes = []
-                self.guards = []
-
-            def after_idle(self, callback):
-                self.pendientes.append(callback)
-
-            def after(self, _milisegundos, callback):
-                self.guards.append(callback)
-                return "guard-1"
-
-        espacio = {
-            "contexto_contingencia_proximidad": None,
-            "registrar_evento_tecnico": eventos.append,
-            "registrar_uso_contingencia": lambda *_: None,
-            "tk": SimpleNamespace(TclError=RuntimeError),
-        }
-        exec(compile(ast.fix_missing_locations(modulo), "<bypass>", "exec"), espacio)
-        parent = ParentFalso()
-        contexto = espacio["iniciar_contexto_contingencia"](
-            "LEJOS", "DEVOLUCION", "A1", parent,
-            reanudar=lambda: None,
-            recuperar_bypass=lambda: recuperaciones.append("UI_RESTAURADA"),
-        )
-        espacio["_autorizar_bypass_proximidad"](contexto)
-        self.assertEqual(len(parent.guards), 1)
-        parent.guards[0]()
-        self.assertEqual(recuperaciones, ["UI_RESTAURADA"])
-        self.assertIn(
-            "DEVOLUCION_BYPASS_CONTINUACION_TIMEOUT "
-            "motivo=CALLBACK_NO_INICIO_DURABLE", eventos
-        )
+    def test_bypass_devolucion_sin_callback_depende_del_watchdog_pre_durable(self):
+        entrega = self.fuente.split("def crear_control_devolucion", 1)[1].split(
+            "def mostrar_ventana_entrega", 1
+        )[0]
+        self.assertIn("def watchdog_pre_durable():", entrega)
+        self.assertIn('abortar_devolucion("TIMEOUT_PRE_DURABLE")', entrega)
+        self.assertIn('ventana.after(5000, watchdog_pre_durable)', entrega)
 
     def test_salida_shift_usa_intencion_exclusiva(self):
         salida = self.fuente.split("def _solicitar_salida_administrativa", 1)[1].split(
