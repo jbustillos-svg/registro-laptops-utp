@@ -232,12 +232,16 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         )[0]
 
         self.assertIn('"DEVOLUCION"', entrega)
-        self.assertIn("reanudar=lambda: procesar_resultado_proximidad(", entrega)
-        self.assertIn("autorizacion_administrativa=True", entrega)
+        self.assertIn("def iniciar_devolucion_durable(", entrega)
+        self.assertIn("reanudar=reanudar_devolucion_administrativa", entrega)
+        self.assertIn("iniciar_devolucion_durable(autorizacion_administrativa=True)", entrega)
         self.assertIn("DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN", entrega)
+        self.assertIn("if not _widget_tk_vivo(ventana_ubicacion):", entrega)
+        self.assertIn("DEVOLUCION_DURABLE_PIPELINE_INICIADO", entrega)
         self.assertIn('if contexto.get("reanudado"):', entrega)
         self.assertIn("parent.after_idle(reanudar)", bypass)
         self.assertIn("contexto[\"reanudado\"] = True", bypass)
+        self.assertIn("DEVOLUCION_BYPASS_CONTINUACION_TIMEOUT", bypass)
         self.assertIn("finalizar_devolucion_durable(", espera)
         self.assertIn("sincronizar_devolucion_pre_apagado(id_evento)", espera)
         self.assertLess(
@@ -621,7 +625,7 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         entrega = self.fuente.split("def entregar_y_apagar", 1)[1].split(
             "def mostrar_ventana_entrega", 1
         )[0]
-        ruta_durable = entrega.split('if boton:\n                boton.config(text="Guardando devolución...")', 1)[1].split(
+        ruta_durable = entrega.split("def iniciar_devolucion_durable", 1)[1].split(
             "def comprobar_devolucion", 1
         )[0]
         self.assertIn("mostrar_ventana_espera_registro(", ruta_durable)
@@ -631,6 +635,46 @@ class PruebasRegistroLaptopFuente(unittest.TestCase):
         )[0]
         self.assertIn('accion="CONTINUAR_SIN_PROXIMIDAD"', solicitud)
         self.assertIn("al_autorizar=lambda: _autorizar_bypass_proximidad(contexto)", solicitud)
+
+    def test_bypass_devolucion_sin_callback_recupera_la_ui(self):
+        modulo = self._funciones_ast(
+            "iniciar_contexto_contingencia", "_autorizar_bypass_proximidad"
+        )
+        eventos, recuperaciones = [], []
+
+        class ParentFalso:
+            def __init__(self):
+                self.pendientes = []
+                self.guards = []
+
+            def after_idle(self, callback):
+                self.pendientes.append(callback)
+
+            def after(self, _milisegundos, callback):
+                self.guards.append(callback)
+                return "guard-1"
+
+        espacio = {
+            "contexto_contingencia_proximidad": None,
+            "registrar_evento_tecnico": eventos.append,
+            "registrar_uso_contingencia": lambda *_: None,
+            "tk": SimpleNamespace(TclError=RuntimeError),
+        }
+        exec(compile(ast.fix_missing_locations(modulo), "<bypass>", "exec"), espacio)
+        parent = ParentFalso()
+        contexto = espacio["iniciar_contexto_contingencia"](
+            "LEJOS", "DEVOLUCION", "A1", parent,
+            reanudar=lambda: None,
+            recuperar_bypass=lambda: recuperaciones.append("UI_RESTAURADA"),
+        )
+        espacio["_autorizar_bypass_proximidad"](contexto)
+        self.assertEqual(len(parent.guards), 1)
+        parent.guards[0]()
+        self.assertEqual(recuperaciones, ["UI_RESTAURADA"])
+        self.assertIn(
+            "DEVOLUCION_BYPASS_CONTINUACION_TIMEOUT "
+            "motivo=CALLBACK_NO_INICIO_DURABLE", eventos
+        )
 
     def test_salida_shift_usa_intencion_exclusiva(self):
         salida = self.fuente.split("def _solicitar_salida_administrativa", 1)[1].split(

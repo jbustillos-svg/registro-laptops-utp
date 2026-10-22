@@ -1431,7 +1431,8 @@ def abrir_acceso_administrativo(
 
 
 def iniciar_contexto_contingencia(
-    estado, tipo_operacion, matricula, parent, reanudar=None
+    estado, tipo_operacion, matricula, parent, reanudar=None,
+    recuperar_bypass=None,
 ):
     global contexto_contingencia_proximidad
     contexto_contingencia_proximidad = {
@@ -1441,7 +1442,10 @@ def iniciar_contexto_contingencia(
         "parent": parent,
         "autorizado": False,
         "reanudado": False,
+        "durable_iniciada": False,
+        "guard_bypass": None,
         "reanudar": reanudar,
+        "recuperar_bypass": recuperar_bypass,
         "cerrar_dialogo_fallo": None
     }
     return contexto_contingencia_proximidad
@@ -1573,10 +1577,39 @@ def _autorizar_bypass_proximidad(contexto):
         # el callback administrativo debe reanudar esta operación concreta.
         contexto["reanudado"] = True
         parent = contexto.get("parent")
+        if contexto.get("operacion") == "DEVOLUCION":
+            def recuperar_bypass_sin_continuacion():
+                if contexto.get("durable_iniciada"):
+                    return
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_CONTINUACION_TIMEOUT "
+                    "motivo=CALLBACK_NO_INICIO_DURABLE"
+                )
+                recuperar = contexto.get("recuperar_bypass")
+                if recuperar:
+                    recuperar()
+
+            try:
+                contexto["guard_bypass"] = parent.after(
+                    4000, recuperar_bypass_sin_continuacion
+                )
+            except (AttributeError, tk.TclError):
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_GUARD_ERROR motivo=PARENT_NO_DISPONIBLE"
+                )
         try:
             parent.after_idle(reanudar)
         except (AttributeError, tk.TclError):
-            reanudar()
+            try:
+                reanudar()
+            except Exception as error:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_CONTINUACION_ERROR "
+                    f"tipo={type(error).__name__}"
+                )
+                recuperar = contexto.get("recuperar_bypass")
+                if recuperar:
+                    recuperar()
 
 
 def _solicitar_contingencia_proximidad(contexto, event=None, origen=None):
@@ -3397,6 +3430,94 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
         print("[DEVOLUCION] modal creado")
         ventana_ubicacion, titulo_ubicacion, mensaje_ubicacion, estado_ubicacion = modal_progreso
         proximidad_visual_activa = {"valor": True}
+        inicio_durable = {"iniciado": False}
+        contexto_devolucion = {"valor": None}
+
+        def restaurar_bypass_devolucion(motivo="CALLBACK_NO_INICIO_DURABLE"):
+            """Devuelve el control si el callback administrativo no llega a SQLite."""
+            if inicio_durable["iniciado"]:
+                return
+            registrar_evento_tecnico(
+                f"DEVOLUCION_TRANSICION_RECUPERADA motivo={motivo}"
+            )
+            if boton:
+                try:
+                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
+                except tk.TclError:
+                    pass
+            try:
+                cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
+            except (AttributeError, tk.TclError):
+                pass
+
+        def iniciar_devolucion_durable(autorizacion_administrativa=False):
+            """Única continuación productiva para proximidad normal y bypass."""
+            nonlocal modal_progreso, ventana_ubicacion
+            nonlocal titulo_ubicacion, mensaje_ubicacion, estado_ubicacion
+            if inicio_durable["iniciado"]:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_DURABLE_OMITIDA motivo=YA_INICIADA"
+                )
+                return
+            inicio_durable["iniciado"] = True
+            contexto = contexto_devolucion["valor"]
+            if contexto:
+                contexto["durable_iniciada"] = True
+                guard_bypass = contexto.get("guard_bypass")
+                if guard_bypass:
+                    try:
+                        ventana.after_cancel(guard_bypass)
+                    except tk.TclError:
+                        pass
+            if autorizacion_administrativa:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN "
+                    f"estado={contexto.get('estado') if contexto else 'DESCONOCIDO'}"
+                )
+            try:
+                if boton:
+                    boton.config(text="Guardando devolución...")
+                # LEJOS cierra el modal original antes de abrir el diálogo de
+                # proximidad. El bypass no puede reutilizar ese Toplevel.
+                if not _widget_tk_vivo(ventana_ubicacion):
+                    modal_progreso = crear_modal_verificacion_ubicacion(
+                        ventana,
+                        "Estamos verificando la información y guardando la entrega del equipo. "
+                        "Por favor, espera.",
+                        titulo="Registrando devolución",
+                        estado="Procesando..."
+                    )
+                    (
+                        ventana_ubicacion,
+                        titulo_ubicacion,
+                        mensaje_ubicacion,
+                        estado_ubicacion
+                    ) = modal_progreso
+                actualizar_modal_progreso(
+                    ventana_ubicacion,
+                    titulo_ubicacion,
+                    mensaje_ubicacion,
+                    estado_ubicacion,
+                    "Registrando devolución",
+                    "Estamos verificando la información y guardando la entrega del equipo. "
+                    "Por favor, espera.",
+                    "Procesando..."
+                )
+                registrar_evento_tecnico("DEVOLUCION_DURABLE_PIPELINE_INICIADO")
+                mostrar_ventana_espera_registro(
+                    ventana, matricula, nombre, modal_progreso,
+                    modo_contingencia=True, boton_entrega=boton
+                )
+            except Exception as error:
+                inicio_durable["iniciado"] = False
+                registrar_evento_tecnico(
+                    "DEVOLUCION_TRANSICION_ERROR "
+                    f"tipo={type(error).__name__}"
+                )
+                restaurar_bypass_devolucion("ERROR_ANTES_DE_SQLITE")
+
+        def reanudar_devolucion_administrativa():
+            iniciar_devolucion_durable(autorizacion_administrativa=True)
 
         def actualizar_intento_ubicacion(intento, total):
             if proximidad_visual_activa["valor"]:
@@ -3445,12 +3566,10 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     "DEVOLUCION",
                     matricula,
                     ventana,
-                    reanudar=lambda: procesar_resultado_proximidad(
-                        True,
-                        estado_proximidad,
-                        autorizacion_administrativa=True
-                    )
+                    reanudar=reanudar_devolucion_administrativa,
+                    recuperar_bypass=restaurar_bypass_devolucion,
                 )
+                contexto_devolucion["valor"] = contexto
                 if not permite_contingencia:
                     cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
 
@@ -3489,29 +3608,7 @@ def entregar_y_apagar(ventana, matricula, nombre, boton=None):
                     boton.config(state="normal", text="ENTREGAR Y APAGAR")
                 return
 
-            if boton:
-                boton.config(text="Guardando devolución...")
-            if autorizacion_administrativa:
-                registrar_evento_tecnico(
-                    "DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN "
-                    f"estado={estado_proximidad}"
-                )
-            actualizar_modal_progreso(
-                ventana_ubicacion,
-                titulo_ubicacion,
-                mensaje_ubicacion,
-                estado_ubicacion,
-                "Registrando devolución",
-                "Estamos verificando la información y guardando la entrega del equipo. "
-                "Por favor, espera.",
-                "Procesando..."
-            )
-            # La devolución no consulta Sheets antes de quedar durable: esta ruta
-            # toma la sesión SQLite exacta, crea el UUID y la cierra primero.
-            mostrar_ventana_espera_registro(
-                ventana, matricula, nombre, modal_progreso,
-                modo_contingencia=True, boton_entrega=boton
-            )
+            iniciar_devolucion_durable(autorizacion_administrativa)
 
         def comprobar_devolucion():
             def notificar_intento(intento, total):
