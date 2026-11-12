@@ -62,7 +62,9 @@ except ImportError:
 # --- VARIABLES GLOBALES ---
 VERSION_SISTEMA = "1.4.12"
 MODO_PRUEBA = False
-PROXIMIDAD_HABILITADA = True
+# Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
+# reactivarla cambiando únicamente este valor a True.
+PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
 hoja_registros = None
 hoja_configuracion_sistema = None
@@ -3552,20 +3554,22 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         cambiar_estado("VALIDANDO_PROXIMIDAD")
         try:
             boton = obtener_boton()
+            if not PROXIMIDAD_HABILITADA:
+                registrar_evento_tecnico(
+                    "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=DEVOLUCION"
+                )
+                boton.config(state="disabled", text="Guardando devolución...")
+                iniciar_persistencia()
+                return
             boton.config(
                 state="disabled",
-                text="Verificando ubicación..." if PROXIMIDAD_HABILITADA else "Guardando devolución...",
+                text="Verificando ubicación...",
             )
             estado["modal"] = crear_modal_verificacion_ubicacion(
                 ventana,
                 "Asegúrate de estar cerca del carrito para continuar con la devolución.",
             )[0]
-            if PROXIMIDAD_HABILITADA:
-                threading.Thread(target=worker_proximidad, daemon=True).start()
-            else:
-                ventana.after_idle(
-                    lambda: procesar_resultado_proximidad(True, None)
-                )
+            threading.Thread(target=worker_proximidad, daemon=True).start()
         except Exception as error:
             registrar_evento_tecnico(
                 f"DEVOLUCION_INICIO_ERROR tipo={type(error).__name__}"
@@ -4417,6 +4421,9 @@ def iniciar_sesion():
 
         alumno_confirmado["nombre"] = nombre
         if not PROXIMIDAD_HABILITADA:
+            registrar_evento_tecnico(
+                "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=PRESTAMO"
+            )
             mostrar_confirmacion_simple(
                 alumno_confirmado["nombre"],
                 matricula,
