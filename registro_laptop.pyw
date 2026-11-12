@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.14"
+VERSION_SISTEMA = "1.4.15"
 MODO_PRUEBA = False
 # Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
 # reactivarla cambiando únicamente este valor a True.
@@ -507,6 +507,9 @@ def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):
         registrar_evento_tecnico(
             "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion"
         )
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_PENDIENTE tipo={tipo_evento} motivo=YA_EN_EJECUCION"
+        )
         return False
 
     def sincronizar():
@@ -517,9 +520,20 @@ def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):
                 almacen_contingencia, configuracion, registrar_evento_tecnico
             )
             if id_evento:
-                sincronizador.sincronizar_evento(id_evento)
+                aplicada = sincronizador.sincronizar_evento(id_evento)
             else:
-                sincronizador.sincronizar()
+                aplicada = bool(sincronizador.sincronizar())
+            if not aplicada:
+                registrar_evento_tecnico(
+                    f"SINCRONIZACION_PENDIENTE tipo={tipo_evento}"
+                )
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+            )
+            registrar_evento_tecnico(
+                f"SINCRONIZACION_PENDIENTE tipo={tipo_evento}"
+            )
         finally:
             sincronizacion_lock.release()
 
@@ -1091,6 +1105,37 @@ def mostrar_confirmacion_personalizada(titulo, mensaje, parent=None):
 
 def mostrar_informacion(titulo, mensaje, parent=None):
     return mostrar_dialogo_personalizado(titulo, mensaje, "info", parent)
+
+
+def mostrar_aviso_autocierre(titulo, mensaje, parent, al_cerrar, duracion_ms=1500):
+    """Muestra una confirmación visual breve sin requerir interacción."""
+    dialogo, _botones, _color, parent = _crear_dialogo_personalizado(
+        titulo, mensaje, "info", parent
+    )
+    cerrado = {"valor": False}
+
+    def cerrar():
+        if cerrado["valor"]:
+            return
+        cerrado["valor"] = True
+        try:
+            dialogo.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            dialogo.destroy()
+        except tk.TclError:
+            pass
+        al_cerrar()
+
+    dialogo.protocol("WM_DELETE_WINDOW", lambda: None)
+    dialogo.bind("<Return>", lambda _evento: "break")
+    dialogo.bind("<Escape>", lambda _evento: "break")
+    _centrar_dialogo(dialogo, parent, ancho_minimo=TAMANOS["dialogo_ancho"])
+    dialogo.grab_set()
+    dialogo.focus_force()
+    dialogo.after(duracion_ms, cerrar)
+    return dialogo
 
 
 def mostrar_advertencia(titulo, mensaje, parent=None):
@@ -3195,10 +3240,10 @@ def registrar_entrada(matricula):
                         registrar_evento_tecnico(
                             f"PRESTAMO_LOCAL_EVENTO_CREADO id={id_evento} tipo=PRESTAMO"
                         )
-                    # registrar_entrada ya corre fuera de Tk. Da al coordinador
-                    # una oportunidad breve antes de mostrar la entrega; si falla,
-                    # SQLite conserva exactamente el mismo UUID para la cola.
-                    sincronizar_evento_inmediato(id_evento)
+                    registrar_evento_tecnico("PRESTAMO_SYNC_INMEDIATA_SOLICITADA")
+                    # La solicitud despierta al sincronizador existente sin
+                    # esperar su POST; el UUID durable queda pendiente si falla.
+                    enviar_evento_local_inmediato(id_evento)
                 else:
                     registrar_evento_tecnico(
                         "PRESTAMO_LOCAL_SESION_EXISTENTE evento=NO_APLICA"
@@ -3380,17 +3425,28 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         registrar_evento_tecnico("DEVOLUCION_FINALIZADA")
         cerrar_modal()
         if sincronizacion_pendiente:
-            mostrar_informacion(
-                "Devolución guardada",
-                "La devolución quedó guardada.\n\n"
-                "Se sincronizará automáticamente.",
-                parent=ventana,
-            )
+            registrar_evento_tecnico("SINCRONIZACION_PENDIENTE tipo=DEVOLUCION")
+
+        def apagar_despues_del_aviso():
+            try:
+                ventana.destroy()
+            except tk.TclError:
+                pass
+            apagar_windows()
+
+        registrar_evento_tecnico("DEVOLUCION_APAGADO_AUTOMATICO")
         try:
-            ventana.destroy()
-        except tk.TclError:
-            pass
-        apagar_windows()
+            mostrar_aviso_autocierre(
+                "Devolución registrada",
+                "Devolución registrada. La laptop se apagará automáticamente.",
+                ventana,
+                apagar_despues_del_aviso,
+            )
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_AVISO_AUTOMATICO_ERROR tipo={type(error).__name__}"
+            )
+            apagar_despues_del_aviso()
 
     def watchdog_pre_durable():
         if estado["estado"] == "PERSISTIENDO_LOCAL":
@@ -3406,24 +3462,12 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
             return
         cancelar_timer("pre_durable")
         cambiar_estado("SINCRONIZANDO")
-        registrar_evento_tecnico(f"DEVOLUCION_SYNC_INMEDIATA_INICIADA id={id_evento}")
-        estado["timers"]["post_durable"] = ventana.after(6000, watchdog_post_durable)
-
-        def worker_sincronizacion():
-            try:
-                aplicada = sincronizar_devolucion_pre_apagado(id_evento)
-                registrar_evento_tecnico(
-                    "DEVOLUCION_SYNC_APLICADA" if aplicada else "DEVOLUCION_SYNC_PENDIENTE"
-                )
-                ejecutar_en_ui_devolucion(finalizar_devolucion, not aplicada)
-            except Exception as error:
-                registrar_evento_tecnico(
-                    f"DEVOLUCION_SYNC_ERROR tipo={type(error).__name__}"
-                )
-                # SQLite ya confirmó: el evento queda pendiente y se apaga.
-                ejecutar_en_ui_devolucion(finalizar_devolucion, True)
-
-        threading.Thread(target=worker_sincronizacion, daemon=True).start()
+        del id_evento
+        registrar_evento_tecnico("DEVOLUCION_SYNC_INMEDIATA_SOLICITADA")
+        # La cola completa conserva PRESTAMO antes de la DEVOLUCION dependiente.
+        # No se espera ninguna respuesta remota para apagar la laptop.
+        solicitada = solicitar_sincronizacion_inmediata("DEVOLUCION")
+        finalizar_devolucion(sincronizacion_pendiente=not solicitada)
 
     def procesar_persistencia(sesion):
         if estado["estado"] != "PERSISTIENDO_LOCAL":
