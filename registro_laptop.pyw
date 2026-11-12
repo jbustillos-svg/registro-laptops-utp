@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.15"
+VERSION_SISTEMA = "1.4.16"
 MODO_PRUEBA = False
 # Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
 # reactivarla cambiando únicamente este valor a True.
@@ -99,6 +99,8 @@ TIEMPO_INACTIVIDAD_MS = 60000
 TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)
 TIMEOUT_SINCRONIZACION_INMEDIATA = (2, 3)
 ESPERA_LOCK_SINCRONIZACION_INMEDIATA = 0.25
+MAX_INTENTOS_SINCRONIZACION_DEVOLUCION = 5
+ESPERA_ENTRE_INTENTOS_DEVOLUCION = 0.25
 timeout_inactividad_id = None
 timeout_inactividad_activo = False
 flujo_cancelado_por_inactividad = False
@@ -1105,37 +1107,6 @@ def mostrar_confirmacion_personalizada(titulo, mensaje, parent=None):
 
 def mostrar_informacion(titulo, mensaje, parent=None):
     return mostrar_dialogo_personalizado(titulo, mensaje, "info", parent)
-
-
-def mostrar_aviso_autocierre(titulo, mensaje, parent, al_cerrar, duracion_ms=1500):
-    """Muestra una confirmación visual breve sin requerir interacción."""
-    dialogo, _botones, _color, parent = _crear_dialogo_personalizado(
-        titulo, mensaje, "info", parent
-    )
-    cerrado = {"valor": False}
-
-    def cerrar():
-        if cerrado["valor"]:
-            return
-        cerrado["valor"] = True
-        try:
-            dialogo.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            dialogo.destroy()
-        except tk.TclError:
-            pass
-        al_cerrar()
-
-    dialogo.protocol("WM_DELETE_WINDOW", lambda: None)
-    dialogo.bind("<Return>", lambda _evento: "break")
-    dialogo.bind("<Escape>", lambda _evento: "break")
-    _centrar_dialogo(dialogo, parent, ancho_minimo=TAMANOS["dialogo_ancho"])
-    dialogo.grab_set()
-    dialogo.focus_force()
-    dialogo.after(duracion_ms, cerrar)
-    return dialogo
 
 
 def mostrar_advertencia(titulo, mensaje, parent=None):
@@ -3326,7 +3297,10 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
     ``estado`` es la única autoridad de etapa. Las referencias al modal y a los
     temporizadores no representan etapas ni se usan como guards de negocio.
     """
-    estado = {"estado": "IDLE", "timers": {}, "modal": None}
+    estado = {
+        "estado": "IDLE", "timers": {}, "modal": None,
+        "modal_elementos": None,
+    }
     ventana._estado_devolucion = estado
 
     def obtener_boton():
@@ -3354,6 +3328,7 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
     def cerrar_modal():
         modal = estado.get("modal")
         estado["modal"] = None
+        estado["modal_elementos"] = None
         if modal:
             cerrar_modal_verificacion_ubicacion(modal)
 
@@ -3364,6 +3339,13 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 ventana, mensaje, titulo=titulo, estado=texto_estado
             )
             estado["modal"] = modal_progreso[0]
+            estado["modal_elementos"] = modal_progreso[1:]
+            return
+        elementos = estado.get("modal_elementos")
+        if elementos:
+            actualizar_modal_progreso(
+                modal, *elementos, titulo, mensaje, texto_estado
+            )
             return
         # El modal existente no necesita recrearse para cambiar de etapa.
         try:
@@ -3417,57 +3399,119 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
                 parent=ventana,
             )
 
-    def finalizar_devolucion(sincronizacion_pendiente=False):
+    def finalizar_devolucion(resultado_sincronizacion):
         if estado["estado"] != "SINCRONIZANDO":
             return
         cancelar_timers()
         cambiar_estado("FINALIZADA")
         registrar_evento_tecnico("DEVOLUCION_FINALIZADA")
-        cerrar_modal()
-        if sincronizacion_pendiente:
+        if resultado_sincronizacion == "CONFIRMADA":
+            actualizar_modal(
+                "Entrega registrada correctamente.",
+                "La laptop se apagará automáticamente.",
+                "",
+            )
+        elif resultado_sincronizacion == "OFFLINE":
+            registrar_evento_tecnico("DEVOLUCION_OFFLINE_GUARDADA_LOCAL")
             registrar_evento_tecnico("SINCRONIZACION_PENDIENTE tipo=DEVOLUCION")
+            actualizar_modal(
+                "Entrega guardada localmente.",
+                "Se sincronizará automáticamente al recuperar la conexión.",
+                "La laptop se apagará automáticamente.",
+            )
+        else:
+            registrar_evento_tecnico("SINCRONIZACION_PENDIENTE tipo=DEVOLUCION")
+            actualizar_modal(
+                "Entrega guardada localmente.",
+                "La sincronización en línea quedó pendiente.",
+                "La laptop se apagará automáticamente.",
+            )
 
         def apagar_despues_del_aviso():
+            cerrar_modal()
+            registrar_evento_tecnico("DEVOLUCION_APAGADO_CONFIRMADO")
             try:
                 ventana.destroy()
             except tk.TclError:
                 pass
             apagar_windows()
 
-        registrar_evento_tecnico("DEVOLUCION_APAGADO_AUTOMATICO")
-        try:
-            mostrar_aviso_autocierre(
-                "Devolución registrada",
-                "Devolución registrada. La laptop se apagará automáticamente.",
-                ventana,
-                apagar_despues_del_aviso,
-            )
-        except Exception as error:
-            registrar_evento_tecnico(
-                f"DEVOLUCION_AVISO_AUTOMATICO_ERROR tipo={type(error).__name__}"
-            )
-            apagar_despues_del_aviso()
+        estado["timers"]["apagado_automatico"] = ventana.after(
+            1250, apagar_despues_del_aviso
+        )
 
     def watchdog_pre_durable():
         if estado["estado"] == "PERSISTIENDO_LOCAL":
             abortar_devolucion("TIMEOUT_PERSISTENCIA")
 
-    def watchdog_post_durable():
-        if estado["estado"] == "SINCRONIZANDO":
-            registrar_evento_tecnico("DEVOLUCION_WATCHDOG_APAGADO")
-            finalizar_devolucion(sincronizacion_pendiente=True)
-
-    def iniciar_sincronizacion(id_evento):
+    def iniciar_sincronizacion(id_evento, prestamo_evento_id=None):
         if estado["estado"] != "PERSISTIENDO_LOCAL":
             return
         cancelar_timer("pre_durable")
         cambiar_estado("SINCRONIZANDO")
-        del id_evento
         registrar_evento_tecnico("DEVOLUCION_SYNC_INMEDIATA_SOLICITADA")
-        # La cola completa conserva PRESTAMO antes de la DEVOLUCION dependiente.
-        # No se espera ninguna respuesta remota para apagar la laptop.
-        solicitada = solicitar_sincronizacion_inmediata("DEVOLUCION")
-        finalizar_devolucion(sincronizacion_pendiente=not solicitada)
+        actualizar_modal(
+            "Preparando entrega...", "Comprobando conexión...", ""
+        )
+
+        def actualizar_intento(intento):
+            actualizar_modal(
+                "Guardando entrega en línea...",
+                "Guardando entrega en línea...",
+                f"Intento {intento} de {MAX_INTENTOS_SINCRONIZACION_DEVOLUCION}",
+            )
+
+        def sincronizar_intento():
+            if not sincronizacion_lock.acquire(
+                timeout=ESPERA_LOCK_SINCRONIZACION_INMEDIATA
+            ):
+                return False
+            try:
+                configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+                sincronizador = SincronizadorContingencia(
+                    almacen_contingencia, configuracion, registrar_evento_tecnico
+                )
+                # La devolución depende del préstamo durable de la misma sesión.
+                if prestamo_evento_id and not sincronizador.sincronizar_evento(
+                    prestamo_evento_id,
+                    timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO,
+                ):
+                    return False
+                return sincronizador.sincronizar_evento(
+                    id_evento,
+                    timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO,
+                )
+            except Exception as error:
+                registrar_evento_tecnico(
+                    f"DEVOLUCION_SYNC_ERROR tipo={type(error).__name__}"
+                )
+                return False
+            finally:
+                sincronizacion_lock.release()
+
+        def worker_sincronizacion():
+            if not verificar_internet():
+                ejecutar_en_ui_devolucion(finalizar_devolucion, "OFFLINE")
+                return
+            for intento in range(1, MAX_INTENTOS_SINCRONIZACION_DEVOLUCION + 1):
+                registrar_evento_tecnico(
+                    "DEVOLUCION_SYNC_INTENTO "
+                    f"intento={intento} max={MAX_INTENTOS_SINCRONIZACION_DEVOLUCION}"
+                )
+                ejecutar_en_ui_devolucion(actualizar_intento, intento)
+                if sincronizar_intento():
+                    registrar_evento_tecnico("DEVOLUCION_SYNC_CONFIRMADA")
+                    ejecutar_en_ui_devolucion(finalizar_devolucion, "CONFIRMADA")
+                    return
+                if intento < MAX_INTENTOS_SINCRONIZACION_DEVOLUCION:
+                    time.sleep(ESPERA_ENTRE_INTENTOS_DEVOLUCION)
+            registrar_evento_tecnico(
+                "DEVOLUCION_SYNC_AGOTADA "
+                f"intentos={MAX_INTENTOS_SINCRONIZACION_DEVOLUCION} pendiente=True"
+            )
+            ejecutar_en_ui_devolucion(finalizar_devolucion, "PENDIENTE")
+
+        threading.Thread(target=worker_sincronizacion, daemon=True).start()
 
     def procesar_persistencia(sesion):
         if estado["estado"] != "PERSISTIENDO_LOCAL":
@@ -3481,7 +3525,7 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
             return
         # finalizar_devolucion_durable sólo retorna tras cerrar el id_sesion
         # exacto y dejar el UUID de DEVOLUCION en SQLite.
-        iniciar_sincronizacion(id_evento)
+        iniciar_sincronizacion(id_evento, sesion.get("prestamo_evento_id"))
 
     def persistir_devolucion():
         try:
