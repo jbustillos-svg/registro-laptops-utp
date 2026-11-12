@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.13"
+VERSION_SISTEMA = "1.4.14"
 MODO_PRUEBA = False
 # Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
 # reactivarla cambiando únicamente este valor a True.
@@ -3555,6 +3555,15 @@ def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
         try:
             boton = obtener_boton()
             if not PROXIMIDAD_HABILITADA:
+                boton.config(state="disabled", text="Continuar...")
+                mostrar_dialogo_personalizado(
+                    "Aviso",
+                    "Antes de continuar, asegúrate de estar cerca del carrito móvil "
+                    "para entregar y apagar la laptop.",
+                    "info",
+                    parent=ventana,
+                    texto_boton="Aceptar",
+                )
                 registrar_evento_tecnico(
                     "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=DEVOLUCION"
                 )
@@ -4420,6 +4429,13 @@ def iniciar_sesion():
             return
 
         alumno_confirmado["nombre"] = nombre
+        mostrar_dialogo_personalizado(
+            "Aviso",
+            "Recuerda permanecer cerca del carrito móvil al tomar la laptop.",
+            "info",
+            parent=ventana,
+            texto_boton="Aceptar",
+        )
         if not PROXIMIDAD_HABILITADA:
             registrar_evento_tecnico(
                 "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=PRESTAMO"
