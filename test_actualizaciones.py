@@ -23,9 +23,17 @@ bootstrap = cargar_bootstrap()
 class AvisoFalso:
     def __init__(self):
         self.mensajes = []
+        self.errores = []
+        self.cerrado = False
 
     def actualizar(self, mensaje):
         self.mensajes.append(mensaje)
+
+    def error(self, mensaje=None):
+        self.errores.append(mensaje)
+
+    def cerrar(self):
+        self.cerrado = True
 
 
 def git(ruta, *argumentos):
@@ -213,7 +221,7 @@ class PruebasActualizacion(unittest.TestCase):
     def test_tracked_bloquea_y_conserva_marker(self):
         (self.laptop / "app.txt").write_text("cambio local\n", encoding="utf-8")
         self._marcar()
-        self.assertFalse(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
+        self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
         self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
         self.assertEqual((self.laptop / "app.txt").read_text(), "cambio local\n")
 
@@ -240,18 +248,47 @@ class PruebasActualizacion(unittest.TestCase):
             return original(argumentos, timeout)
 
         with mock.patch.object(bootstrap, "ejecutar_git", side_effect=ejecutar):
-            self.assertFalse(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
+            self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(AvisoFalso()))
         self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
 
-    def test_sin_red_espera_y_luego_aplica(self):
+    def test_sin_red_usa_local_y_conserva_marker(self):
         self._marcar()
         aviso = AvisoFalso()
         with mock.patch.object(bootstrap, "red_disponible", return_value=False), mock.patch.object(
             bootstrap, "esperar_red"
         ) as esperar:
             self.assertTrue(bootstrap.aplicar_actualizacion_pendiente(aviso))
-        esperar.assert_called_once_with(aviso)
-        self.assertFalse(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+        esperar.assert_not_called()
+        self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+        self.assertIn("Sin conexión. Iniciando modo local...", aviso.mensajes)
+
+    def test_canal_piloto_sin_red_conserva_canal_y_usa_local(self):
+        contenido = '{"rama": "desarrollo-contingencia-v1.4.7"}'
+        self._escribir_canal(contenido)
+        self._marcar()
+        aviso = AvisoFalso()
+        with mock.patch.object(bootstrap, "red_disponible", return_value=False):
+            self.assertTrue(bootstrap.comprobar_actualizacion_arranque(aviso))
+        self.assertEqual(
+            bootstrap.RUTA_CANAL_ACTUALIZACION.read_text(encoding="utf-8"), contenido
+        )
+        self.assertEqual(bootstrap.rama_actualizacion(), "desarrollo-contingencia-v1.4.7")
+        self.assertTrue(bootstrap.RUTA_ACTUALIZACION_PENDIENTE.exists())
+
+    def test_version_local_abre_aplicacion_tras_fallo_actualizacion(self):
+        aviso = AvisoFalso()
+        proceso = mock.Mock()
+        senal = self.laptop / "app_lista.tmp"
+        with mock.patch.object(bootstrap, "comprobar_actualizacion_arranque", return_value=True), \
+             mock.patch.object(bootstrap, "hash_requirements", return_value="hash"), \
+             mock.patch.object(bootstrap, "entorno_preparado", return_value=True), \
+             mock.patch.object(bootstrap, "crear_senal_app_lista", return_value=(senal, "token")), \
+             mock.patch.object(bootstrap, "iniciar_aplicacion", return_value=proceso) as iniciar, \
+             mock.patch.object(bootstrap, "esperar_app_lista", return_value=True), \
+             mock.patch.object(bootstrap.time, "sleep"):
+            bootstrap.ejecutar_preparacion(aviso)
+        iniciar.assert_called_once_with(senal, "token")
+        self.assertTrue(aviso.cerrado)
 
     def test_marker_tiene_prioridad_sobre_comprobacion_rapida(self):
         self._marcar()

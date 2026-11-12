@@ -52,19 +52,52 @@ class PruebasActualizacionProximidad(unittest.TestCase):
                     return ast.literal_eval(nodo.value)
         self.fail(f"No se encontró {nombre}")
 
-    def test_proximidad_esta_habilitada(self):
-        self.assertIs(self.asignacion("PROXIMIDAD_HABILITADA"), True)
+    def test_proximidad_esta_deshabilitada_temporalmente(self):
+        self.assertIs(self.asignacion("PROXIMIDAD_HABILITADA"), False)
         self.assertIs(self.asignacion("MODO_PRUEBA"), False)
-        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.4.0")
+        self.assertEqual(self.asignacion("VERSION_SISTEMA"), "1.4.12")
 
-    def test_prestamo_confirma_nombre_luego_proximidad_y_luego_identidad(self):
+    def test_prestamo_omite_escaneo_y_continua_a_identidad_si_esta_deshabilitada(self):
         confirmar = self.fuente.index("confirmado = mostrar_confirmacion_personalizada")
-        proximidad = self.fuente.index("threading.Thread(target=comprobar_proximidad", confirmar)
-        continuar = self.fuente.index("mostrar_confirmacion_simple(", proximidad)
-        self.assertLess(confirmar, proximidad)
-        self.assertLess(proximidad, continuar)
+        omision = self.fuente.index(
+            "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=PRESTAMO", confirmar
+        )
+        continuar = self.fuente.index("mostrar_confirmacion_simple(", omision)
+        escaneo = self.fuente.index("threading.Thread(target=comprobar_proximidad", continuar)
+        self.assertLess(confirmar, omision)
+        self.assertLess(omision, continuar)
+        self.assertLess(continuar, escaneo)
         self.assertTrue(rol_requiere_curp("ALUMNO"))
         self.assertFalse(rol_requiere_curp("DOCENTE"))
+
+    def test_devolucion_omite_proximidad_y_entra_a_pipeline_durable(self):
+        bloque = self.fuente.split("    def iniciar_devolucion():", 1)[1].split(
+            "    ventana._abortar_devolucion", 1
+        )[0]
+        omision = bloque.index(
+            "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=DEVOLUCION"
+        )
+        durable = bloque.index("iniciar_persistencia()", omision)
+        modal = bloque.index("crear_modal_verificacion_ubicacion(", durable)
+        ruta_habilitada = bloque.index("threading.Thread(target=worker_proximidad", modal)
+        self.assertLess(omision, durable)
+        self.assertLess(durable, modal)
+        self.assertLess(modal, ruta_habilitada)
+
+    def test_bandera_true_conserva_ruta_de_proximidad(self):
+        fuente_habilitada = self.fuente.replace(
+            "PROXIMIDAD_HABILITADA = False", "PROXIMIDAD_HABILITADA = True", 1
+        )
+        self.assertIn("PROXIMIDAD_HABILITADA = True", fuente_habilitada)
+        bloque = self.fuente.split("    def iniciar_devolucion():", 1)[1].split(
+            "    ventana._abortar_devolucion", 1
+        )[0]
+        self.assertIn("if not PROXIMIDAD_HABILITADA:", bloque)
+        self.assertIn("threading.Thread(target=worker_proximidad, daemon=True).start()", bloque)
+        self.assertIn(
+            "verificar_proximidad_carrito(callback_evento=registrar_evento_tecnico)",
+            self.fuente,
+        )
 
     def test_devolucion_proximidad_antes_de_sheets_registro_y_apagado(self):
         inicio = self.fuente.index("def entregar_y_apagar")

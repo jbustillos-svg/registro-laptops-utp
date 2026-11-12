@@ -34,8 +34,8 @@ RAMAS_ACTUALIZACION_PERMITIDAS = frozenset(
 )
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TIEMPO_ESPERA_APP_LISTA = 120
-TIMEOUT_FETCH_RAPIDO = 6
-INTENTOS_FETCH_RAPIDO = 2
+TIMEOUT_FETCH_RAPIDO = 3
+INTENTOS_FETCH_RAPIDO = 1
 
 
 def rama_actualizacion():
@@ -366,6 +366,16 @@ def detalle_resultado(resultado):
     )[:500]
 
 
+def usar_version_local(aviso, causa):
+    """La actualización nunca impide ejecutar una instalación local válida."""
+    registrar(
+        "ACTUALIZACION_SIN_CONEXION usando_version_local=True "
+        f"causa={causa}"
+    )
+    aviso.actualizar("Sin conexión. Iniciando modo local...")
+    return True
+
+
 def crear_marker_actualizacion(origen):
     ruta_temporal = RUTA_ACTUALIZACION_PENDIENTE.with_suffix(".tmp")
     ruta_temporal.write_text("pendiente\n", encoding="ascii")
@@ -405,41 +415,44 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
         with BloqueoActualizacion():
             if not fetch_realizado:
                 if not red_disponible():
-                    esperar_red(aviso)
-                    aviso.actualizar("Actualizando sistema...")
+                    # Conservar el marker y el canal para reintentar en el
+                    # próximo arranque, sin bloquear el uso offline.
+                    return usar_version_local(aviso, "SIN_RED_MARKER_PENDIENTE")
 
-                fetch = ejecutar_git(["fetch", "origin", rama, "--quiet"], 30)
+                fetch = ejecutar_git(
+                    ["fetch", "origin", rama, "--quiet"], TIMEOUT_FETCH_RAPIDO
+                )
                 if fetch.returncode != 0:
                     registrar(
                         f"actualización pendiente: fetch falló: {detalle_resultado(fetch)}"
                     )
-                    return False
+                    return usar_version_local(aviso, "FETCH_FALLIDO_MARKER_PENDIENTE")
 
             estado = ejecutar_git(
                 ["status", "--porcelain", "--untracked-files=no"], 10
             )
             if estado.returncode != 0:
                 registrar(f"actualización pendiente: status falló: {detalle_resultado(estado)}")
-                return False
+                return usar_version_local(aviso, "STATUS_GIT_FALLIDO")
             if estado.stdout.strip():
                 registrar(
                     "actualización bloqueada por cambios tracked: "
                     + " | ".join(estado.stdout.splitlines())[:1000]
                 )
-                return False
+                return usar_version_local(aviso, "CAMBIOS_LOCALES_PROTEGIDOS")
 
             avance = ejecutar_git(
                 ["rev-parse", "--verify", referencia], 10
             )
             if avance.returncode != 0:
                 registrar(f"actualización bloqueada: {referencia} no permite fast-forward")
-                return False
+                return usar_version_local(aviso, "REFERENCIA_REMOTA_NO_DISPONIBLE")
 
             rama_local = rama_local_canal(rama)
             colocar = ejecutar_git(["checkout", "-B", rama_local, referencia], 30)
             if colocar.returncode != 0:
                 registrar(f"cambio exacto de rama falló: {detalle_resultado(colocar)}")
-                return False
+                return usar_version_local(aviso, "CHECKOUT_ACTUALIZACION_FALLIDO")
 
             RUTA_ACTUALIZACION_PENDIENTE.unlink()
             registrar("actualización pendiente aplicada; marker eliminado")
@@ -447,7 +460,7 @@ def aplicar_actualizacion_pendiente(aviso, fetch_realizado=False):
             return True
     except (FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         registrar(f"actualización pendiente no aplicada: {type(error).__name__}: {error}")
-        return False
+        return usar_version_local(aviso, f"ERROR_ACTUALIZACION_{type(error).__name__}")
 
 
 def comprobar_actualizacion_arranque(aviso):
@@ -479,18 +492,17 @@ def comprobar_actualizacion_arranque(aviso):
             )
 
     if fetch is None or fetch.returncode != 0:
-        registrar(
-            f"comprobación rápida omitida; se usará versión local | "
-            f"duracion={time.monotonic() - inicio:.2f}s"
+        return usar_version_local(
+            aviso,
+            f"FETCH_RAPIDO_NO_DISPONIBLE_{time.monotonic() - inicio:.2f}s",
         )
-        return True
 
     try:
         pendientes = ejecutar_git(["rev-list", "--count", f"HEAD..{referencia}"], 5)
         cantidad = int(pendientes.stdout.strip() or "0") if pendientes.returncode == 0 else 0
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         registrar(f"no se pudo interpretar comprobación rápida: {error}")
-        return True
+        return usar_version_local(aviso, "REV_LIST_FALLIDO")
 
     if cantidad == 0:
         registrar(
@@ -502,7 +514,7 @@ def comprobar_actualizacion_arranque(aviso):
         crear_marker_actualizacion("comprobación de arranque")
     except OSError as error:
         registrar(f"no se pudo crear marker de actualización: {error}")
-        return False
+        return usar_version_local(aviso, "MARKER_NO_DISPONIBLE")
     registrar(
         f"comprobación rápida encontró commits={cantidad} | "
         f"duracion={time.monotonic() - inicio:.2f}s"
@@ -522,15 +534,20 @@ def red_disponible(timeout=3):
         return False
 
 
-def esperar_red(aviso, intervalo=10):
-    registrar("red no disponible; esperando")
+def esperar_red(aviso, timeout=3):
+    """Compatibilidad acotada: nunca bloquea el bootstrap indefinidamente."""
+    registrar(f"red no disponible; espera acotada={timeout}s")
     aviso.actualizar("Esperando conexión...")
-    while not red_disponible():
-        for _ in range(intervalo):
-            time.sleep(1)
-            aviso.actualizar("Esperando conexión...")
-    registrar("red disponible")
-    aviso.actualizar("Preparando sistema...")
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if red_disponible():
+            registrar("red disponible")
+            aviso.actualizar("Preparando sistema...")
+            return True
+        time.sleep(0.2)
+    registrar("red no disponible tras espera acotada")
+    aviso.actualizar("Sin conexión. Iniciando modo local...")
+    return False
 
 
 def verificar_imports_entorno():
@@ -691,7 +708,11 @@ def ejecutar_preparacion(aviso):
                 if entorno_anterior_funcional:
                     registrar("venv anterior funcional; se inicia sin actualizar")
                 else:
+                    # Sin una instalación local ejecutable no hay aplicación
+                    # que iniciar, pero tampoco se deja la pantalla esperando.
                     esperar_red(aviso)
+                    aviso.error("No existe un entorno local utilizable para iniciar el sistema.")
+                    return
             else:
                 registrar("red disponible")
             if not entorno_anterior_funcional or hay_red:
@@ -704,7 +725,8 @@ def ejecutar_preparacion(aviso):
                     if preparado or entorno_utilizable:
                         break
                     if not red_disponible():
-                        esperar_red(aviso)
+                        registrar("red perdida durante preparación; no se reintenta en este arranque")
+                        break
                     elif intento < 3:
                         aviso.actualizar(
                             "Preparando sistema..."

@@ -16,7 +16,26 @@ import sys
 import certifi
 import tempfile
 import msvcrt
+import uuid
 from contextlib import contextmanager
+from contingencia_local import (
+    CACHE_NO_DISPONIBLE,
+    CACHE_OK,
+    INTERNET_ERROR,
+    INTERNET_OK,
+    SHEETS_API_ERROR,
+    SHEETS_AUTH_ERROR,
+    SHEETS_OK,
+    SHEETS_TIMEOUT,
+    ContingenciaLocal,
+)
+from sincronizador_contingencia import (
+    SincronizadorContingencia,
+)
+from sincronizacion_config import (
+    actualizar_configuracion_desde_hoja,
+    cargar_configuracion_local,
+)
 from proximidad_carrito import (
     ESTADO_ERROR,
     ESTADO_NO_DETECTADO,
@@ -41,11 +60,14 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.0"
+VERSION_SISTEMA = "1.5.0"
 MODO_PRUEBA = False
-PROXIMIDAD_HABILITADA = True
+# Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
+# reactivarla cambiando únicamente este valor a True.
+PROXIMIDAD_HABILITADA = False
 hoja_alumnos = None
 hoja_registros = None
+hoja_configuracion_sistema = None
 zona_horaria = pytz.timezone("America/Chihuahua")
 verificar_conexion_activo = True
 procesando_sesion = False
@@ -55,13 +77,30 @@ chk_label = None
 verificacion_aviso_en_curso = False
 conexion_google_lock = threading.Lock()
 actualizacion_lock = threading.Lock()
+sincronizacion_lock = threading.Lock()
+configuracion_sincronizacion_lock = threading.Lock()
 dialogo_admin_abierto = False
+dialogo_admin_referencia = None
+dialogo_admin_estado = None
 contexto_contingencia_proximidad = None
 confirmacion_contingencia_abierta = False
+atajo_administrativo_en_curso = False
+ultimo_atajo_administrativo = 0.0
 registro_contingencias_sesion = []
 ventana_entrega_activa = None
+almacen_contingencia = None
+diagnostico_conectividad = {
+    "internet": None,
+    "sheets": None,
+    "cache": CACHE_NO_DISPONIBLE,
+}
 
 TIEMPO_INACTIVIDAD_MS = 60000
+TIMEOUT_SINCRONIZACION_PRE_APAGADO = (2, 3)
+TIMEOUT_SINCRONIZACION_INMEDIATA = (2, 3)
+ESPERA_LOCK_SINCRONIZACION_INMEDIATA = 0.25
+MAX_INTENTOS_SINCRONIZACION_DEVOLUCION = 5
+ESPERA_ENTRE_INTENTOS_DEVOLUCION = 0.25
 timeout_inactividad_id = None
 timeout_inactividad_activo = False
 flujo_cancelado_por_inactividad = False
@@ -91,6 +130,499 @@ def registrar_evento_tecnico(evento):
             )
     except OSError:
         pass
+
+
+def actualizar_diagnostico_conectividad(componente, estado):
+    """Registra estados independientes para red, Sheets y caché local."""
+    if diagnostico_conectividad.get(componente) == estado:
+        return
+    diagnostico_conectividad[componente] = estado
+    registrar_evento_tecnico(f"CONECTIVIDAD componente={componente} estado={estado}")
+
+
+def clasificar_error_sheets(error):
+    if isinstance(error, (requests.Timeout, socket.timeout)):
+        return SHEETS_TIMEOUT
+    detalle = f"{type(error).__name__}: {error}".lower()
+    if any(texto in detalle for texto in ("auth", "credential", "token", "permission", "forbidden", "unauthorized")):
+        return SHEETS_AUTH_ERROR
+    if "timeout" in detalle or "timed out" in detalle:
+        return SHEETS_TIMEOUT
+    return SHEETS_API_ERROR
+
+
+def inicializar_infraestructura_contingencia():
+    """Prepara SQLite al arrancar, sin impedir el funcionamiento actual si falla."""
+    global almacen_contingencia
+    try:
+        almacen_contingencia = ContingenciaLocal(DIRECTORIO_APP)
+        ruta = almacen_contingencia.inicializar()
+        estado = almacen_contingencia.estado_cache()
+        actualizar_diagnostico_conectividad("cache", estado)
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DB_LISTA ruta={ruta} schema_version="
+            f"{almacen_contingencia.version_esquema()}"
+        )
+    except Exception as error:
+        almacen_contingencia = None
+        actualizar_diagnostico_conectividad("cache", CACHE_NO_DISPONIBLE)
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_DB_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def actualizar_cache_persona(matricula, **datos):
+    """Guarda sólo datos confirmados por consultas normales de Sheets."""
+    if almacen_contingencia is None:
+        return
+    try:
+        almacen_contingencia.upsert_persona(matricula, **datos)
+        actualizar_diagnostico_conectividad("cache", CACHE_OK)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CACHE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def obtener_persona_cache(matricula):
+    if almacen_contingencia is None:
+        return None
+    try:
+        return almacen_contingencia.obtener_persona(matricula)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CACHE_LECTURA_ERROR={type(error).__name__}: {error}"
+        )
+        return None
+
+
+def _fecha_hora_local():
+    ahora = datetime.now(zona_horaria)
+    return ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M:%S")
+
+
+def enviar_evento_local_inmediato(id_evento):
+    """Despierta la cola persistente sin esperar un POST desde el flujo de UI."""
+    if almacen_contingencia is None:
+        return False
+    evento = almacen_contingencia.obtener_evento(id_evento)
+    if not evento:
+        return False
+    solicitar_sincronizacion_inmediata(evento["tipo_evento"], id_evento=id_evento)
+    # La solicitud puede omitirse porque un worker ya procesa la misma cola.
+    # El evento sigue durable y pendiente hasta que el sincronizador lo confirme.
+    return True
+
+
+def sincronizar_evento_inmediato(id_evento, timeout=TIMEOUT_SINCRONIZACION_INMEDIATA):
+    """Intenta una vez el UUID durable mediante el sincronizador existente.
+
+    Debe invocarse desde un worker. La cola y el ciclo de 45 segundos siguen
+    siendo el respaldo si no hay red, el coordinador falla o ya hay un ciclo
+    procesando la misma base local.
+    """
+    if almacen_contingencia is None:
+        return False
+    try:
+        evento = almacen_contingencia.obtener_evento(id_evento)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+        )
+        return False
+    if not evento or evento.get("sincronizado"):
+        return bool(evento and evento.get("sincronizado"))
+
+    registrar_evento_tecnico(
+        f"SINCRONIZACION_INMEDIATA_SOLICITADA tipo={evento['tipo_evento']}"
+    )
+    if not sincronizacion_lock.acquire(
+        timeout=ESPERA_LOCK_SINCRONIZACION_INMEDIATA
+    ):
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion"
+        )
+        return False
+    try:
+        registrar_evento_tecnico("SINCRONIZACION_INMEDIATA_INICIADA")
+        configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+        aplicada = SincronizadorContingencia(
+            almacen_contingencia, configuracion, registrar_evento_tecnico
+        ).sincronizar_evento(id_evento, timeout=timeout)
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_APLICADA"
+            if aplicada else "SINCRONIZACION_INMEDIATA_PENDIENTE"
+        )
+        return aplicada
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+        )
+        return False
+    finally:
+        sincronizacion_lock.release()
+
+
+def crear_y_enviar_evento_critico(tipo, matricula, nombre, fecha, hora, laptop_id,
+                                  datos, clave_estable):
+    """Persistencia primero: nunca hay fallback de escritura crítica por gspread."""
+    if almacen_contingencia is None:
+        return False
+    id_evento = str(uuid.uuid5(uuid.NAMESPACE_URL, f"utp-v141:{tipo}:{clave_estable}"))
+    almacen_contingencia.crear_evento(
+        socket.gethostname(), tipo, matricula, nombre, fecha, hora, laptop_id,
+        datos, id_evento=id_evento,
+    )
+    return enviar_evento_local_inmediato(id_evento)
+
+
+def registrar_prestamo_contingencia(matricula, nombre):
+    if almacen_contingencia is None:
+        return False
+    try:
+        fecha, hora = _fecha_hora_local()
+        sesion = almacen_contingencia.registrar_prestamo_offline(
+            matricula, nombre, socket.gethostname(), fecha, hora
+        )
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_PRESTAMO_GUARDADO matricula={matricula} fecha={fecha} hora={hora}"
+        )
+        id_evento = sesion.get("prestamo_evento_id")
+        if id_evento:
+            enviar_evento_local_inmediato(id_evento)
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_PRESTAMO_ERROR={type(error).__name__}: {error}"
+        )
+        return False
+
+
+def persistir_prestamo_online_local(matricula, nombre, fecha, hora, laptop_id):
+    """No crea evento: Sheets ya confirmó el préstamo normal."""
+    if almacen_contingencia is None:
+        return
+    try:
+        almacen_contingencia.registrar_prestamo_online(
+            matricula, nombre, laptop_id, fecha, hora
+        )
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SESION_ONLINE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def obtener_sesion_local_activa(matricula=None):
+    if almacen_contingencia is None:
+        return None
+    try:
+        sesion = almacen_contingencia.obtener_sesion_activa(socket.gethostname())
+        if sesion and matricula and sesion["matricula"] != str(matricula).strip():
+            return None
+        if sesion:
+            registrar_evento_tecnico(
+                f"SESION_ACTIVA_CONSULTADA id_sesion={sesion['id_sesion']}"
+            )
+        return sesion
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SESION_LECTURA_ERROR={type(error).__name__}: {error}"
+        )
+        return None
+
+
+def registrar_sesion_pendiente_al_iniciar():
+    """Cierra una sesión heredada; nunca la recupera para una nueva ejecución."""
+    sesion = obtener_sesion_local_activa()
+    if not sesion:
+        registrar_evento_tecnico("SESION_RESIDUAL_DETECTADA resultado=NO_ACTIVA")
+        return None
+
+    registrar_evento_tecnico(
+        f"SESION_RESIDUAL_DETECTADA id_sesion={sesion['id_sesion']}"
+    )
+    try:
+        fecha, hora = _fecha_hora_local()
+        resultado = almacen_contingencia.cerrar_sesion_residual_al_arrancar(
+            socket.gethostname(), fecha, hora, socket.gethostname()
+        )
+        cerrada = resultado.get("sesion")
+        if resultado.get("resultado") != "SESION_RESIDUAL_CERRADA" or not cerrada:
+            registrar_evento_tecnico("SESION_RESIDUAL_CIERRE_OMITIDO motivo=SIN_SESION")
+            return None
+        if resultado.get("no_entrega_creada"):
+            registrar_evento_tecnico(
+                f"NO_ENTREGA_RESIDUAL_CREADA id_sesion={cerrada['id_sesion']}"
+            )
+        for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+            if cerrada.get(campo):
+                enviar_evento_local_inmediato(cerrada[campo])
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_CERRADA id_sesion={cerrada['id_sesion']}"
+        )
+        registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO")
+        return cerrada
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_CIERRE_ERROR tipo={type(error).__name__}"
+        )
+        return None
+
+
+def finalizar_devolucion_durable(matricula, solicitar_sincronizacion=True):
+    """Única autoridad local: crea DEVOLUCION y cierra su sesión exacta."""
+    if almacen_contingencia is None:
+        return False
+    try:
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_SIN_SESION_ACTIVA"
+            )
+            return False
+        registrar_evento_tecnico(
+            f"DEVOLUCION_INICIADA id_sesion={sesion_previa['id_sesion']}"
+        )
+        fecha, hora = _fecha_hora_local()
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
+        sesion = almacen_contingencia.registrar_devolucion_offline(
+            matricula, socket.gethostname(), fecha, hora,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
+        )
+        registrar_evento_tecnico(
+            f"DEVOLUCION_EVENTO_DURABLE id={sesion.get('devolucion_evento_id')}"
+        )
+        id_evento = sesion.get("devolucion_evento_id")
+        if id_evento and solicitar_sincronizacion:
+            enviar_evento_local_inmediato(id_evento)
+        return sesion
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"DEVOLUCION_DURABLE_ERROR={type(error).__name__}: {error}"
+        )
+        return False
+
+
+def registrar_devolucion_contingencia(matricula, solicitar_sincronizacion=True):
+    """Compatibilidad para llamadores existentes de la devolución durable."""
+    return finalizar_devolucion_durable(matricula, solicitar_sincronizacion)
+
+
+def persistir_devolucion_online_local(matricula, hora_salida):
+    if almacen_contingencia is None:
+        return
+    try:
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_ONLINE_SIN_SESION_ACTIVA"
+            )
+            return
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
+        almacen_contingencia.registrar_devolucion_online(
+            matricula, socket.gethostname(), hora_salida,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion_previa['id_sesion']}"
+        )
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_SALIDA_ONLINE_ERROR={type(error).__name__}: {error}"
+        )
+
+
+def no_entregas_efectivas_local(matricula, no_entregas_cache):
+    if almacen_contingencia is None:
+        return int(no_entregas_cache or 0)
+    try:
+        return almacen_contingencia.no_entregas_efectivas(matricula, no_entregas_cache)
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_NO_ENTREGAS_ERROR={type(error).__name__}: {error}"
+        )
+        return int(no_entregas_cache or 0)
+
+
+def actualizar_configuracion_sincronizacion():
+    """Lee la hoja central sólo al conectar o en revisiones poco frecuentes."""
+    if hoja_configuracion_sistema is None:
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    if not configuracion_sincronizacion_lock.acquire(blocking=False):
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    try:
+        configuracion, actualizada = actualizar_configuracion_desde_hoja(
+            DIRECTORIO_APP, hoja_configuracion_sistema
+        )
+        if actualizada:
+            registrar_evento_tecnico("SINCRONIZACION_CONFIG_ACTUALIZADA")
+        return configuracion
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_CONFIG_LECTURA_ERROR={type(error).__name__}"
+        )
+        return cargar_configuracion_local(DIRECTORIO_APP)
+    finally:
+        configuracion_sincronizacion_lock.release()
+
+
+def _sincronizar_pendientes_con_lock_adquirido():
+    """Procesa la cola; el llamador conserva sincronizacion_lock durante todo el ciclo."""
+    if not almacen_contingencia:
+        return
+    configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+    if not configuracion:
+        return
+    cantidad = SincronizadorContingencia(
+        almacen_contingencia, configuracion, registrar_evento_tecnico
+    ).sincronizar()
+    if cantidad:
+        registrar_evento_tecnico(f"SINCRONIZACION_COMPLETA eventos={cantidad}")
+
+
+def sincronizar_pendientes_en_segundo_plano():
+    if not sincronizacion_lock.acquire(blocking=False):
+        return
+    try:
+        _sincronizar_pendientes_con_lock_adquirido()
+    finally:
+        sincronizacion_lock.release()
+
+
+def solicitar_sincronizacion_inmediata(tipo_evento, id_evento=None):
+    """Da prioridad al UUID nuevo sin abrir un segundo coordinador ni POST paralelo."""
+    registrar_evento_tecnico(
+        f"SINCRONIZACION_INMEDIATA_SOLICITADA tipo={tipo_evento}"
+    )
+    if not sincronizacion_lock.acquire(blocking=False):
+        registrar_evento_tecnico(
+            "SINCRONIZACION_INMEDIATA_OMITIDA motivo=ya_en_ejecucion"
+        )
+        registrar_evento_tecnico(
+            f"SINCRONIZACION_PENDIENTE tipo={tipo_evento} motivo=YA_EN_EJECUCION"
+        )
+        return False
+
+    def sincronizar():
+        try:
+            registrar_evento_tecnico("SINCRONIZACION_INMEDIATA_INICIADA")
+            configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+            sincronizador = SincronizadorContingencia(
+                almacen_contingencia, configuracion, registrar_evento_tecnico
+            )
+            if id_evento:
+                aplicada = sincronizador.sincronizar_evento(id_evento)
+            else:
+                aplicada = bool(sincronizador.sincronizar())
+            if not aplicada:
+                registrar_evento_tecnico(
+                    f"SINCRONIZACION_PENDIENTE tipo={tipo_evento}"
+                )
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"SINCRONIZACION_INMEDIATA_ERROR tipo={type(error).__name__}"
+            )
+            registrar_evento_tecnico(
+                f"SINCRONIZACION_PENDIENTE tipo={tipo_evento}"
+            )
+        finally:
+            sincronizacion_lock.release()
+
+    threading.Thread(target=sincronizar, daemon=True).start()
+    return True
+
+
+def sincronizar_devolucion_pre_apagado(id_evento):
+    """Da una sola oportunidad breve a DEVOLUCION antes del shutdown.
+
+    SQLite ya contiene el evento y su hora original al entrar aquí. Un fallo de
+    red sólo conserva la cola pendiente: no cambia el resultado de la entrega.
+    """
+    if almacen_contingencia is None:
+        return False
+    registrar_evento_tecnico("DEVOLUCION_PRE_APAGADO_SINCRONIZACION_INICIADA")
+    try:
+        aplicada = sincronizar_evento_inmediato(
+            id_evento, timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO
+        )
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_APLICADA"
+            if aplicada else "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_PENDIENTE"
+        )
+        return aplicada
+    except Exception as error:
+        registrar_evento_tecnico(
+            "DEVOLUCION_PRE_APAGADO_SINCRONIZACION_ERROR="
+            f"{type(error).__name__}"
+        )
+        return False
+
+
+def iniciar_sincronizacion_pendientes():
+    threading.Thread(target=sincronizar_pendientes_en_segundo_plano, daemon=True).start()
+
+
+def cerrar_sesion_contingencia_por_nueva_sesion(matricula_nueva):
+    """Resuelve en SQLite la sesión previa de otra matrícula y envía sus UUID."""
+    if almacen_contingencia is None:
+        return False
+    try:
+        fecha, hora = _fecha_hora_local()
+        laptop_id = socket.gethostname()
+        previa = obtener_sesion_local_activa()
+        if not previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=CIERRE_AUTOMATICO_SIN_SESION_ACTIVA"
+            )
+            return True
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={previa['id_sesion']} tipo_evento=NO_ENTREGA"
+        )
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={previa['id_sesion']} tipo_evento=CIERRE_AUTOMATICO"
+        )
+        resultado = almacen_contingencia.resolver_sesion_activa_por_nueva_matricula(
+            laptop_id, matricula_nueva, fecha, hora, laptop_id,
+            registrar_no_entrega=not matricula_exenta_no_entrega(previa["matricula"]),
+        )
+        sesion = resultado.get("sesion")
+        if resultado["resultado"] != "SESION_ANTERIOR_CERRADA":
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO "
+                f"id_sesion={previa['id_sesion']} motivo={resultado['resultado']}"
+            )
+            return resultado["resultado"] == "SIN_SESION"
+        for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+            id_evento = sesion.get(campo)
+            if id_evento:
+                enviar_evento_local_inmediato(id_evento)
+        registrar_evento_tecnico(
+            "CONTINGENCIA_CIERRE_AUTOMATICO "
+            f"matricula_anterior={sesion['matricula']} matricula_nueva={matricula_nueva}"
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
+        )
+        return True
+    except Exception as error:
+        registrar_evento_tecnico(
+            f"CONTINGENCIA_CIERRE_AUTOMATICO_ERROR={type(error).__name__}: {error}"
+        )
+        return False
 
 
 def limpiar_logs_antiguos(dias=7):
@@ -385,6 +917,7 @@ def _crear_dialogo_personalizado(titulo, mensaje, tipo, parent, texto_destacado=
     parent = parent or ventana
 
     dialogo = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(dialogo)
     dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_FONDO)
@@ -604,6 +1137,7 @@ def mostrar_exito(titulo, mensaje, parent=None):
 
 
 def mostrar_fallo_proximidad(estado, parent=None, al_crear=None):
+    registrar_evento_tecnico(f"PROXIMIDAD_DIALOGO_ABIERTO estado={estado}")
     if estado == ESTADO_NO_DETECTADO:
         mostrar_error(
             "Carrito no detectado",
@@ -627,7 +1161,7 @@ def mostrar_fallo_proximidad(estado, parent=None, al_crear=None):
         return
 
     mostrar_error(
-        "Ubicación no validada",
+        "Laptop fuera de la ubicación autorizada",
         "Para continuar, la laptop debe encontrarse dentro del área del carrito móvil.\n"
         "Acérquese al carrito e inténtelo nuevamente.",
         parent=parent,
@@ -661,29 +1195,157 @@ def registrar_uso_contingencia(tipo_operacion, matricula):
         print(f"[CONTINGENCIA_ADMIN] No se pudo escribir el registro local: {error}")
 
 
-def abrir_acceso_administrativo(event=None, parent=None):
-    global dialogo_admin_abierto
+def _widget_tk_vivo(widget):
+    if widget is None:
+        return False
+    try:
+        return bool(widget.winfo_exists())
+    except (tk.TclError, AttributeError):
+        return False
 
+
+def _restaurar_grab_administrativo(grab_anterior, foco_anterior):
+    """Devuelve control al modal previo si todavía existe."""
+    if not _widget_tk_vivo(grab_anterior):
+        return
+    try:
+        grab_anterior.grab_set()
+        if _widget_tk_vivo(foco_anterior):
+            foco_anterior.focus_set()
+        else:
+            grab_anterior.focus_force()
+        registrar_evento_tecnico("ADMIN_GRAB_RESTAURADO")
+    except tk.TclError:
+        pass
+
+
+def finalizar_dialogo_administrativo(motivo="CANCELADO", restaurar=True, dialogo=None):
+    """Cierra idempotentemente el diálogo administrativo y libera su estado.
+
+    También se invoca si Tk destruye el diálogo indirectamente al destruir el
+    modal padre durante el timeout de inactividad.
+    """
+    global dialogo_admin_abierto, dialogo_admin_referencia, dialogo_admin_estado
+
+    estado = dialogo_admin_estado
+    if not estado or estado.get("finalizado"):
+        return False
+    if dialogo is not None and estado.get("dialogo") is not dialogo:
+        return False
+
+    estado["finalizado"] = True
+    dialogo = estado.get("dialogo")
+    for after_id in tuple(estado.get("after_pendientes", ())):
+        try:
+            dialogo.after_cancel(after_id)
+        except (tk.TclError, AttributeError):
+            pass
+    estado["after_pendientes"] = []
+
+    if _widget_tk_vivo(dialogo):
+        try:
+            dialogo.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            dialogo.destroy()
+        except tk.TclError:
+            pass
+
+    dialogo_admin_abierto = False
+    dialogo_admin_referencia = None
+    dialogo_admin_estado = None
+    registrar_evento_tecnico(f"ADMIN_DIALOGO_CIERRE motivo={motivo}")
+    registrar_evento_tecnico("ADMIN_ESTADO_LIMPIADO")
+    if restaurar:
+        _restaurar_grab_administrativo(
+            estado.get("grab_anterior"), estado.get("foco_anterior")
+        )
+    registrar_evento_tecnico("ADMIN_REAPERTURA_PERMITIDA")
+    return True
+
+
+def abrir_acceso_administrativo(
+    event=None,
+    parent=None,
+    contexto="DESCONOCIDO",
+    accion="SALIR_SISTEMA",
+    al_autorizar=None,
+):
+    global dialogo_admin_abierto, dialogo_admin_referencia, dialogo_admin_estado
+
+    registrar_evento_tecnico(
+        f"ADMIN_SOLICITUD estado_guard={dialogo_admin_abierto} "
+        f"contexto={contexto} accion={accion}"
+    )
     if dialogo_admin_abierto:
         return "break"
 
-    dialogo_admin_abierto = True
-    parent = parent or ventana
+    if accion not in ("CONTINUAR_SIN_PROXIMIDAD", "SALIR_SISTEMA"):
+        raise ValueError(f"Acción administrativa no válida: {accion}")
 
-    dialogo = tk.Toplevel(parent)
-    dialogo.title("Cierre administrativo")
+    parent = parent or ventana
+    registrar_evento_tecnico(
+        f"ADMIN_DIALOGO_SOLICITADO accion={accion} contexto={contexto}"
+    )
+
+    grab_anterior = None
+    foco_anterior = None
+    try:
+        grab_anterior = ventana.grab_current()
+        foco_anterior = ventana.focus_get()
+    except tk.TclError:
+        pass
+
+    if _widget_tk_vivo(grab_anterior):
+        try:
+            grab_anterior.grab_release()
+            registrar_evento_tecnico("ADMIN_GRAB_TEMPORAL_LIBERADO")
+        except tk.TclError:
+            grab_anterior = None
+
+    try:
+        dialogo = tk.Toplevel(parent)
+    except Exception:
+        dialogo_admin_abierto = False
+        _restaurar_grab_administrativo(grab_anterior, foco_anterior)
+        raise
+    dialogo_admin_abierto = True
+    dialogo_admin_referencia = dialogo
+    dialogo_admin_estado = {
+        "dialogo": dialogo,
+        "grab_anterior": grab_anterior,
+        "foco_anterior": foco_anterior,
+        "after_pendientes": [],
+        "finalizado": False,
+    }
+    es_bypass_proximidad = accion == "CONTINUAR_SIN_PROXIMIDAD"
+    titulo = (
+        "Autorización administrativa"
+        if es_bypass_proximidad else "Cierre administrativo"
+    )
+    mensaje = (
+        "Introduzca la contraseña administrativa para continuar sin "
+        "verificación de proximidad."
+        if es_bypass_proximidad else
+        "Introduzca la contraseña administrativa para cerrar el sistema."
+    )
+    texto_boton = "CONTINUAR" if es_bypass_proximidad else "CERRAR SISTEMA"
+    tipo_boton = "principal" if es_bypass_proximidad else "error"
+
+    dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
     dialogo.transient(parent)
     dialogo.attributes("-topmost", True)
     dialogo.withdraw()
 
-    contenido = tk.Frame(dialogo, bg=COLOR_TARJETA, padx=30, pady=24)
+    contenido = tk.Frame(dialogo, bg=COLOR_TARJETA, padx=22, pady=18)
     contenido.pack(fill=tk.BOTH, expand=True)
 
     tk.Label(
         contenido,
-        text="Cierre administrativo",
+        text=titulo,
         font=FUENTE_SUBTITULO,
         fg=COLOR_TEXTO,
         bg=COLOR_TARJETA
@@ -691,10 +1353,11 @@ def abrir_acceso_administrativo(event=None, parent=None):
 
     mensaje_label = tk.Label(
         contenido,
-        text="Introduzca la contraseña administrativa para cerrar el sistema.",
+        text=mensaje,
         font=FUENTE_CUERPO,
         fg=COLOR_TEXTO_SECUNDARIO,
-        bg=COLOR_TARJETA
+        bg=COLOR_TARJETA,
+        wraplength=460
     )
     mensaje_label.pack(pady=(0, 14))
 
@@ -713,10 +1376,10 @@ def abrir_acceso_administrativo(event=None, parent=None):
         show="*",
         justify=tk.CENTER,
         bd=0,
-        width=28,
+        width=24,
         **estilo_entrada()
     )
-    entrada_clave.pack(fill=tk.X, ipady=9, pady=(6, 0))
+    entrada_clave.pack(anchor="w", ipady=8, pady=(5, 0))
 
     estado_intentos = tk.Label(
         contenido,
@@ -728,27 +1391,26 @@ def abrir_acceso_administrativo(event=None, parent=None):
     estado_intentos.pack(pady=(8, 0))
 
     botones = tk.Frame(contenido, bg=COLOR_TARJETA)
-    botones.pack(fill=tk.X, pady=(18, 0))
+    botones.pack(fill=tk.X, pady=(14, 0))
     intentos_incorrectos = {"cantidad": 0}
 
-    def cerrar():
-        global dialogo_admin_abierto
-        try:
-            dialogo.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            dialogo.destroy()
-        except tk.TclError:
-            pass
-        dialogo_admin_abierto = False
+    def cerrar(motivo="CANCELADO", restaurar=True):
+        finalizar_dialogo_administrativo(motivo, restaurar, dialogo)
 
-    def cerrar_sistema():
+    def completar_autorizacion():
         global contexto_contingencia_proximidad
         global confirmacion_contingencia_abierta
         global ventana_entrega_activa
 
-        cerrar()
+        registrar_evento_tecnico(f"ADMIN_AUTORIZACION_CORRECTA accion={accion}")
+        cerrar("AUTORIZADO", restaurar=False)
+
+        if accion == "CONTINUAR_SIN_PROXIMIDAD":
+            if al_autorizar:
+                al_autorizar()
+            return
+
+        registrar_evento_tecnico("SALIDA_ADMIN_AUTORIZADA")
         contexto_contingencia_proximidad = None
         confirmacion_contingencia_abierta = False
         ventana_entrega_activa = None
@@ -762,12 +1424,12 @@ def abrir_acceso_administrativo(event=None, parent=None):
         clave = ""
 
         if hmac.compare_digest(hash_ingresado, HASH_CLAVE_ADMIN):
-            cerrar_sistema()
+            completar_autorizacion()
             return
 
         intentos_incorrectos["cantidad"] += 1
         if intentos_incorrectos["cantidad"] >= 3:
-            cerrar()
+            cerrar("PASSWORD_INCORRECTA")
             return
 
         restantes = 3 - intentos_incorrectos["cantidad"]
@@ -779,31 +1441,41 @@ def abrir_acceso_administrativo(event=None, parent=None):
     tk.Button(
         botones,
         text="CANCELAR",
-        padx=20,
-        pady=8,
+        padx=16,
+        pady=7,
         command=cerrar,
         **estilo_boton("secundario")
-    ).pack(side=tk.RIGHT, padx=(12, 0))
+    ).pack(side=tk.RIGHT, padx=(10, 0))
 
     tk.Button(
         botones,
-        text="CERRAR SISTEMA",
-        padx=20,
-        pady=8,
+        text=texto_boton,
+        padx=16,
+        pady=7,
         command=autenticar,
-        **estilo_boton("error")
+        **estilo_boton(tipo_boton)
     ).pack(side=tk.RIGHT)
 
-    dialogo.protocol("WM_DELETE_WINDOW", cerrar)
+    def al_destruir(event):
+        if event.widget == dialogo:
+            finalizar_dialogo_administrativo("DESTROY_PROGRAMATICO", dialogo=dialogo)
+
+    dialogo.protocol("WM_DELETE_WINDOW", lambda: cerrar("CANCELADO"))
     dialogo.bind("<Return>", lambda _evento: autenticar())
-    dialogo.bind("<Escape>", lambda _evento: cerrar())
-    _centrar_dialogo(dialogo, parent, ancho_minimo=460, alto_minimo=285)
+    dialogo.bind("<Escape>", lambda _evento: cerrar("CANCELADO"))
+    dialogo.bind("<Destroy>", al_destruir, add="+")
+    vincular_dispatcher_administrativo(dialogo)
+    _centrar_dialogo(dialogo, parent, ancho_minimo=520, alto_minimo=260)
     dialogo.grab_set()
-    entrada_clave.focus_set()
+    entrada_clave.focus_force()
+    registrar_evento_tecnico("ADMIN_DIALOGO_ABIERTO")
     return "break"
 
 
-def iniciar_contexto_contingencia(estado, tipo_operacion, matricula, parent):
+def iniciar_contexto_contingencia(
+    estado, tipo_operacion, matricula, parent, reanudar=None,
+    recuperar_bypass=None,
+):
     global contexto_contingencia_proximidad
     contexto_contingencia_proximidad = {
         "estado": estado,
@@ -811,13 +1483,28 @@ def iniciar_contexto_contingencia(estado, tipo_operacion, matricula, parent):
         "matricula": matricula,
         "parent": parent,
         "autorizado": False,
+        "reanudado": False,
+        "reanudar": reanudar,
+        "recuperar_bypass": recuperar_bypass,
         "cerrar_dialogo_fallo": None
     }
+    return contexto_contingencia_proximidad
 
 
 def registrar_dialogo_fallo_contingencia(_dialogo, cerrar_dialogo):
     if contexto_contingencia_proximidad is not None:
         contexto_contingencia_proximidad["cerrar_dialogo_fallo"] = cerrar_dialogo
+        contexto_contingencia_proximidad["dialogo"] = _dialogo
+        contexto_contingencia_proximidad["ultima_tecla"] = None
+        registrar_evento_tecnico(
+            "ESTADO_PROXIMIDAD_ACTUAL="
+            f"{contexto_contingencia_proximidad['estado']}"
+        )
+        registrar_evento_tecnico(
+            "CONTINGENCIA_ABIERTA_FLAG="
+            f"{confirmacion_contingencia_abierta}"
+        )
+        vincular_dispatcher_administrativo(_dialogo)
 
 
 def finalizar_contexto_contingencia():
@@ -830,55 +1517,273 @@ def finalizar_contexto_contingencia():
     return autorizado
 
 
-def manejar_atajo_administrativo(event=None):
-    global confirmacion_contingencia_abierta
-
-    contexto = contexto_contingencia_proximidad
-    if contexto and contexto["estado"] in (ESTADO_NO_DETECTADO, ESTADO_ERROR):
-        if confirmacion_contingencia_abierta:
-            return "break"
-
-        confirmacion_contingencia_abierta = True
-        try:
-            continuar = mostrar_confirmacion_personalizada(
-                "Continuar sin verificación",
-                "No fue posible detectar el carrito.\n"
-                "¿Desea continuar con el proceso sin validar la proximidad?",
-                parent=contexto["parent"]
-            )
-            if continuar:
-                contexto["autorizado"] = True
-                registrar_uso_contingencia(
-                    contexto["operacion"],
-                    contexto["matricula"]
-                )
-            cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
-            if cerrar_dialogo_fallo:
-                cerrar_dialogo_fallo()
-        finally:
-            confirmacion_contingencia_abierta = False
-        return "break"
-
+def es_atajo_administrativo(event):
+    """Reconoce Ctrl+Alt+U sin depender de la variante de keysym de Windows."""
     try:
-        widget_origen = getattr(event, "widget", None) if event else None
-        widget_con_foco = widget_origen or ventana.focus_get()
-        if widget_con_foco:
-            ventana_con_foco = widget_con_foco.winfo_toplevel()
-            if ventana_con_foco == ventana:
-                return abrir_acceso_administrativo(event, parent=ventana)
-            if (
-                ventana_entrega_activa is not None
-                and ventana_entrega_activa.winfo_exists()
-                and ventana_con_foco == ventana_entrega_activa
-            ):
-                return abrir_acceso_administrativo(
-                    event,
-                    parent=ventana_entrega_activa
-                )
+        estado = int(getattr(event, "state", 0))
+        return (
+            str(getattr(event, "keysym", "")).lower() == "u"
+            and bool(estado & 0x0004)  # Control
+            # Tk usa Mod1 (0x0008), pero Windows también reporta Alt como 0x20000.
+            and bool(estado & (0x0008 | 0x20000))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def es_atajo_salida_administrativa(event):
+    """Escape técnico independiente: Ctrl+Alt+Shift+U desde cualquier modal."""
+    try:
+        estado = int(getattr(event, "state", 0))
+        return es_atajo_administrativo(event) and bool(estado & 0x0001)
+    except (TypeError, ValueError):
+        return False
+
+
+def registrar_tecla_proximidad(event):
+    """Registra metadatos de teclado, nunca el texto introducido por el usuario."""
+    contexto = contexto_contingencia_proximidad
+    if not contexto:
+        return
+
+    huella = (
+        getattr(event, "serial", None),
+        getattr(event, "time", None),
+        getattr(event, "keycode", None),
+        getattr(event, "state", None),
+        getattr(event, "keysym", None),
+    )
+    if contexto.get("ultima_tecla") == huella:
+        return
+    contexto["ultima_tecla"] = huella
+
+    widget = getattr(event, "widget", None)
+    try:
+        widget_seguro = widget.winfo_class() if widget else "NINGUNO"
+    except tk.TclError:
+        widget_seguro = "DESTRUIDO"
+    registrar_evento_tecnico(
+        "TECLA_PROXIMIDAD "
+        f"keysym={getattr(event, 'keysym', '')} "
+        f"keycode={getattr(event, 'keycode', '')} "
+        f"state={getattr(event, 'state', '')} "
+        f"widget={widget_seguro}"
+    )
+
+
+def _contexto_visual_administrativo(event=None, origen=None):
+    """Resuelve el Toplevel activo sin limitarse al root o a la entrega."""
+    candidatos = [origen, getattr(event, "widget", None) if event else None]
+    try:
+        candidatos.extend((ventana.grab_current(), ventana.focus_get()))
     except tk.TclError:
         pass
 
-    return "break"
+    for candidato in candidatos:
+        if not _widget_tk_vivo(candidato):
+            continue
+        try:
+            return candidato.winfo_toplevel()
+        except tk.TclError:
+            continue
+    return ventana
+
+
+def _accion_atajo_administrativo(estado_proximidad):
+    """Ctrl+Alt+U siempre pide autorización para omitir proximidad activa."""
+    del estado_proximidad
+    return "CONTINUAR_SIN_PROXIMIDAD"
+
+
+def _autorizar_bypass_proximidad(contexto):
+    """Autoriza y reanuda la operación que estaba esperando proximidad."""
+    if contexto_contingencia_proximidad is not contexto or contexto.get("autorizado"):
+        return
+    estado = contexto.get("estado")
+    registrar_evento_tecnico(
+        f"PROXIMIDAD_BYPASS_ADMIN_AUTORIZADO estado={estado}"
+    )
+    contexto["autorizado"] = True
+    registrar_uso_contingencia(
+        contexto["operacion"],
+        contexto["matricula"],
+    )
+    cerrar_dialogo_fallo = contexto.get("cerrar_dialogo_fallo")
+    if cerrar_dialogo_fallo:
+        cerrar_dialogo_fallo()
+    reanudar = contexto.get("reanudar")
+    if reanudar:
+        # No depender de que wait_window vuelva a la pila que abrió el diálogo:
+        # el callback administrativo debe reanudar esta operación concreta.
+        contexto["reanudado"] = True
+        parent = contexto.get("parent")
+        try:
+            parent.after_idle(reanudar)
+        except (AttributeError, tk.TclError):
+            try:
+                reanudar()
+            except Exception as error:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_CONTINUACION_ERROR "
+                    f"tipo={type(error).__name__}"
+                )
+                recuperar = contexto.get("recuperar_bypass")
+                if recuperar:
+                    recuperar()
+
+
+def _solicitar_contingencia_proximidad(contexto, event=None, origen=None):
+    estado = contexto.get("estado")
+    registrar_evento_tecnico(
+        f"CONTINGENCIA_PROXIMIDAD_SOLICITADA estado={estado}"
+    )
+    dialogo_fallo = contexto.get("dialogo")
+    parent = (
+        dialogo_fallo
+        if _widget_tk_vivo(dialogo_fallo)
+        else contexto["parent"]
+    )
+    return abrir_acceso_administrativo(
+        event,
+        parent=parent,
+        contexto=f"PROXIMIDAD_{estado}",
+        accion="CONTINUAR_SIN_PROXIMIDAD",
+        al_autorizar=lambda: _autorizar_bypass_proximidad(contexto),
+    )
+
+
+def _solicitar_salida_administrativa(event, origen, contexto):
+    parent = _contexto_visual_administrativo(event, origen)
+    return abrir_acceso_administrativo(
+        event,
+        parent=parent,
+        contexto=contexto,
+        accion="SALIR_SISTEMA",
+    )
+
+
+def manejar_evento_administrativo(
+    event,
+    origen=None,
+    combinacion_confirmada=False,
+    forzar_salida=False,
+):
+    """Entrada común para bindings directos y el respaldo global."""
+    registrar_tecla_proximidad(event)
+    forzar_salida = forzar_salida or es_atajo_salida_administrativa(event)
+    if forzar_salida or combinacion_confirmada or es_atajo_administrativo(event):
+        return manejar_atajo_administrativo(
+            event,
+            origen=origen,
+            combinacion_confirmada=combinacion_confirmada,
+            forzar_salida=forzar_salida,
+        )
+    return None
+
+
+def vincular_dispatcher_administrativo(widget):
+    """Da a cada root/Toplevel acceso directo al dispatcher central."""
+    if getattr(widget, "_dispatcher_admin_vinculado", False):
+        return
+    widget._dispatcher_admin_vinculado = True
+    widget.bind(
+        "<KeyPress>",
+        lambda event, origen=widget: manejar_evento_administrativo(event, origen),
+        add="+",
+    )
+    # Estos bindings cubren la traducción nativa de Tk; KeyPress cubre las
+    # variantes de state (Alt 0x0008 / 0x20000) observadas en Windows.
+    for secuencia in ("<Control-Alt-u>", "<Control-Alt-U>"):
+        widget.bind(
+            secuencia,
+            lambda event, origen=widget: manejar_evento_administrativo(
+                event,
+                origen,
+                combinacion_confirmada=True,
+            ),
+            add="+",
+        )
+    for secuencia in ("<Control-Alt-Shift-u>", "<Control-Alt-Shift-U>"):
+        widget.bind(
+            secuencia,
+            lambda event, origen=widget: manejar_evento_administrativo(
+                event,
+                origen,
+                combinacion_confirmada=True,
+                forzar_salida=True,
+            ),
+            add="+",
+        )
+
+
+def manejar_tecla_global(event):
+    """Respaldo global; los modales críticos también tienen binding directo."""
+    registrar_actividad_usuario(event)
+    return manejar_evento_administrativo(event)
+
+
+def manejar_atajo_administrativo(
+    event=None,
+    origen=None,
+    combinacion_confirmada=False,
+    forzar_salida=False,
+):
+    global atajo_administrativo_en_curso
+    global ultimo_atajo_administrativo
+
+    if not combinacion_confirmada and event is not None and not es_atajo_administrativo(event):
+        return None
+
+    keysym = str(getattr(event, "keysym", "")) if event else ""
+    state = getattr(event, "state", "") if event else ""
+    registrar_evento_tecnico(f"TECLA_ADMIN_RECIBIDA keysym={keysym} state={state}")
+    registrar_evento_tecnico("ATAJO_CTRL_ALT_U_DETECTADO")
+    ahora = time.monotonic()
+    if atajo_administrativo_en_curso or ahora - ultimo_atajo_administrativo < 0.20:
+        registrar_evento_tecnico("ATAJO_ADMIN_OMITIDO motivo=doble_disparo")
+        return "break"
+
+    atajo_administrativo_en_curso = True
+    ultimo_atajo_administrativo = ahora
+    try:
+        contexto_proximidad = contexto_contingencia_proximidad
+        if contexto_proximidad and not forzar_salida:
+            estado = contexto_proximidad.get("estado")
+            registrar_evento_tecnico("ATAJO_ADMIN_DETECTADO contexto=PROXIMIDAD")
+            registrar_evento_tecnico(f"ESTADO_PROXIMIDAD_ACTUAL={estado}")
+            registrar_evento_tecnico(
+                f"CONTINGENCIA_ABIERTA_FLAG={confirmacion_contingencia_abierta}"
+            )
+            accion = _accion_atajo_administrativo(estado)
+            if accion == "CONTINUAR_SIN_PROXIMIDAD":
+                return _solicitar_contingencia_proximidad(
+                    contexto_proximidad,
+                    event,
+                    origen,
+                )
+
+        if not forzar_salida:
+            registrar_evento_tecnico(
+                "ATAJO_CTRL_ALT_U_RECHAZADO motivo=SIN_PROXIMIDAD_ACTIVA"
+            )
+            return "break"
+
+        parent = _contexto_visual_administrativo(event, origen)
+        contexto = "LOGIN" if parent == ventana else "MODAL"
+        if forzar_salida and contexto_proximidad:
+            contexto = f"PROXIMIDAD_{contexto_proximidad.get('estado')}_SALIDA"
+        registrar_evento_tecnico(f"ATAJO_ADMIN_DETECTADO contexto={contexto}")
+        return _solicitar_salida_administrativa(event, parent, contexto)
+    finally:
+        atajo_administrativo_en_curso = False
+
+
+def manejar_atajo_admin(event=None, combinacion_confirmada=False):
+    """Alias temporal para integraciones que invocaban el nombre anterior."""
+    return manejar_atajo_administrativo(
+        event,
+        combinacion_confirmada=combinacion_confirmada,
+    )
 
 
 def crear_modal_verificacion_ubicacion(
@@ -888,6 +1793,7 @@ def crear_modal_verificacion_ubicacion(
     estado="Intento 1 de 5"
 ):
     dialogo = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(dialogo)
     dialogo.title(titulo)
     dialogo.resizable(False, False)
     dialogo.configure(bg=COLOR_TARJETA)
@@ -1041,12 +1947,15 @@ def apagar_windows():
         return
 
     if MODO_PRUEBA:
+        registrar_evento_tecnico("APAGADO_SIMULADO modo_prueba=True")
         mostrar_exito(
             "Modo de prueba",
             "La devolución terminó correctamente. En funcionamiento normal, "
             "la laptop se apagaría en este momento."
         )
-        cerrar_aplicacion()
+        # Reinicia sólo el flujo de la aplicación para poder ejecutar otra
+        # prueba; nunca cierra sesión de Windows ni toca el proceso del sistema.
+        crear_pantalla_login()
         return
 
     os.system("shutdown /s /t 3")
@@ -1083,6 +1992,7 @@ def mostrar_ventana_control_unificada(
     estado
 ):
     ventana_ctrl = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(ventana_ctrl)
     registrar_ventana_flujo_alumno(ventana_ctrl)
     ventana_ctrl.title("Aviso importante")
     ventana_ctrl.resizable(False, False)
@@ -1187,6 +2097,7 @@ def mostrar_ventana_control_unificada(
     x = (pantalla_ancho - ancho) // 2
     y = (pantalla_alto - alto) // 2
     ventana_ctrl.geometry(f"{ancho}x{alto}+{x}+{y}")
+    ventana_ctrl.focus_force()
 
     # ESPERAR a que el usuario cierre la ventana
     ventana_ctrl.wait_window()
@@ -1196,49 +2107,8 @@ def matricula_exenta_no_entrega(matricula):
 
 
 def incrementar_no_entregas(matricula, contador_objetivo):
-    """
-    Lleva No_Entregas hasta un objetivo persistido en la fila de Registros.
-    El estado se calcula ÚNICAMENTE por fórmula en Google Sheets.
-    """
-    try:
-        matricula = str(matricula).strip()
-        if matricula_exenta_no_entrega(matricula):
-            return 0, "EXENTO"
-
-        if hoja_alumnos is None:
-            raise ErrorConsultaGoogle("La hoja Alumnos no está disponible")
-
-        matriculas = hoja_alumnos.col_values(1)
-        if matricula not in matriculas:
-            raise ErrorConsultaGoogle("La matrícula no existe en la hoja Alumnos")
-
-        fila = matriculas.index(matricula) + 1
-
-        valor_actual = hoja_alumnos.cell(fila, 5).value
-        no_entregas_actual = int(valor_actual) if valor_actual else 0
-        no_entregas_nuevo = max(no_entregas_actual, int(contador_objetivo))
-
-        try:
-            hoja_alumnos.update_cell(fila, 5, no_entregas_nuevo)
-        except Exception as error_actualizacion:
-            print(f"Respuesta ambigua al sincronizar no entregas: {error_actualizacion}")
-
-        valor_confirmado = hoja_alumnos.cell(fila, 5).value
-        try:
-            contador_confirmado = int(valor_confirmado) if valor_confirmado else 0
-        except (TypeError, ValueError) as error:
-            raise ErrorConsultaGoogle("No se pudo confirmar No_Entregas") from error
-        if contador_confirmado != no_entregas_nuevo:
-            raise ErrorConsultaGoogle("No se pudo confirmar No_Entregas")
-
-        # NO TOCAR columna del estado (tiene fórmula)
-        return no_entregas_nuevo, "CALCULADO_POR_FORMULA"
-
-    except ErrorConsultaGoogle:
-        raise
-    except Exception as e:
-        print(f"Error al incrementar no entregas: {e}")
-        raise ErrorConsultaGoogle("No se pudo actualizar el control del alumno") from e
+    """Obsoleto: los incrementos se aplican sólo en Apps Script."""
+    raise RuntimeError("NO_ENTREGA_DEBE_USAR_COORDINADOR")
     
 def _contador_no_entregas_actual(matricula):
     matriculas = hoja_alumnos.col_values(1)
@@ -1259,13 +2129,7 @@ def _objetivo_estado_intermedio(observacion, prefijo):
 
 
 def _finalizar_observacion(numero_fila, observacion_final):
-    try:
-        hoja_registros.update_cell(numero_fila, COL_OBSERVACION + 1, observacion_final)
-    except Exception as error_actualizacion:
-        print(f"Respuesta ambigua al finalizar no entrega: {error_actualizacion}")
-    confirmado = hoja_registros.cell(numero_fila, COL_OBSERVACION + 1).value
-    if str(confirmado or "").strip() != observacion_final:
-        raise ErrorConsultaGoogle("No se pudo confirmar la observación final")
+    raise RuntimeError("OBSERVACION_DEBE_USAR_COORDINADOR")
 
 
 def cerrar_sesion_anterior_y_contar_no_entrega(matricula):
@@ -1284,6 +2148,17 @@ def _cerrar_sesion_anterior_y_contar_no_entrega(matricula):
 
         registros = hoja_registros.get_all_values()
         hora_actual, _ = obtener_hora_internet()
+
+        # Las escrituras críticas se delegan al coordinador; gspread sólo leyó la sesión.
+        for fila in reversed(registros):
+            if len(fila) > COL_OBSERVACION and fila[COL_MATRICULA] == matricula and fila[COL_HORA_SALIDA].strip() == "" and observacion_es_normal(fila[COL_OBSERVACION]):
+                datos = {"matricula": matricula, "nombre": fila[COL_NOMBRE], "fecha": fila[COL_FECHA], "hora_ingreso": fila[COL_HORA_INGRESO], "hora_salida": hora_actual, "laptop_id": fila[COL_LAPTOP_ID], "observacion": "CIERRE_AUTOMATICO_POR_NUEVA_SESION"}
+                clave = f"{matricula}:{fila[COL_LAPTOP_ID]}:{fila[COL_FECHA]}:{fila[COL_HORA_INGRESO]}"
+                if not matricula_exenta_no_entrega(matricula):
+                    crear_y_enviar_evento_critico("NO_ENTREGA", matricula, fila[COL_NOMBRE], fila[COL_FECHA], hora_actual, fila[COL_LAPTOP_ID], datos, clave)
+                crear_y_enviar_evento_critico("CIERRE_AUTOMATICO", matricula, fila[COL_NOMBRE], fila[COL_FECHA], hora_actual, fila[COL_LAPTOP_ID], datos, clave)
+                return True
+        return False
 
         for i in reversed(range(len(registros))):
             fila = registros[i]
@@ -1333,13 +2208,7 @@ def _cerrar_sesion_anterior_y_contar_no_entrega(matricula):
                         return False
 
                     estado_intermedio = f"PROCESANDO_CIERRE_AUTOMATICO:{objetivo}"
-                    try:
-                        hoja_registros.batch_update([
-                            {"range": f"E{numero_fila}", "values": [[hora_actual]]},
-                            {"range": f"G{numero_fila}", "values": [[estado_intermedio]]}
-                        ])
-                    except Exception as error_marcado:
-                        print(f"Respuesta ambigua al cerrar sesión anterior: {error_marcado}")
+                    raise RuntimeError("CIERRE_AUTOMATICO_DEBE_USAR_COORDINADOR")
                     verificacion = hoja_registros.get(f"E{numero_fila}:G{numero_fila}")
                     if (
                         not verificacion
@@ -1389,6 +2258,9 @@ def obtener_control_alumno(matricula):
 
             no_entregas = int(no_entregas) if no_entregas else 0
             estado = normalizar_estado_alumno(estado, lectura_exitosa=True)
+            actualizar_cache_persona(
+                matricula, no_entregas=no_entregas, estado=estado
+            )
 
             return no_entregas, estado
 
@@ -1402,6 +2274,7 @@ def obtener_control_alumno(matricula):
 
 def mostrar_instrucciones_iniciales(matricula=""):
     ventana_info = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(ventana_info)
     ventana_info.title("Instrucciones de Uso")
     ventana_info.resizable(False, False)
     ventana_info.configure(bg=COLOR_FONDO)
@@ -1553,11 +2426,13 @@ def verificar_internet():
                 allow_redirects=True
             )
             if respuesta.status_code < 500:
+                actualizar_diagnostico_conectividad("internet", INTERNET_OK)
                 return True
                 
         except Exception as e:
             pass
 
+    actualizar_diagnostico_conectividad("internet", INTERNET_ERROR)
     return False
 
 
@@ -1669,7 +2544,7 @@ def iniciar_actualizacion_en_segundo_plano():
 
 
 def conectar_google_sheets(internet_verificado=False):
-    global hoja_alumnos, hoja_registros
+    global hoja_alumnos, hoja_registros, hoja_configuracion_sistema
 
     if not internet_verificado and not verificar_internet():
         cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
@@ -1696,17 +2571,34 @@ def conectar_google_sheets(internet_verificado=False):
 
             hoja_alumnos = sheet.worksheet("Alumnos")
             hoja_registros = sheet.worksheet("Registros")
+            try:
+                hoja_configuracion_sistema = sheet.worksheet("Configuracion_Sistema")
+            except Exception:
+                # El cliente jamás crea esta hoja ni inventa credenciales.
+                hoja_configuracion_sistema = None
 
+            actualizar_diagnostico_conectividad("sheets", SHEETS_OK)
+            actualizar_configuracion_sincronizacion()
+            iniciar_sincronizacion_pendientes()
             cambiar_estado("Conectado", COLOR_EXITO)
             return True
-        except FileNotFoundError:
+        except FileNotFoundError as error:
             hoja_alumnos = None
             hoja_registros = None
+            hoja_configuracion_sistema = None
+            actualizar_diagnostico_conectividad("sheets", SHEETS_AUTH_ERROR)
+            registrar_evento_tecnico(
+                f"SHEETS_CREDENCIALES_ERROR={type(error).__name__}: {error}"
+            )
             cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
             return False
         except Exception as e:
             hoja_alumnos = None
             hoja_registros = None
+            hoja_configuracion_sistema = None
+            actualizar_diagnostico_conectividad(
+                "sheets", clasificar_error_sheets(e)
+            )
             cambiar_estado("Error en la conexión", COLOR_ERROR)
             return False
 
@@ -1717,8 +2609,12 @@ def verificar_conexion_base_datos():
         return False
     try:
         hoja_alumnos.acell("A1")
+        actualizar_diagnostico_conectividad("sheets", SHEETS_OK)
         return True
     except Exception as error:
+        actualizar_diagnostico_conectividad(
+            "sheets", clasificar_error_sheets(error)
+        )
         print(f"Error al verificar Google Sheets: {error}")
         return False
 
@@ -1762,7 +2658,10 @@ def verificar_conexion_periodicamente():
         else:
             cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
         
-        time.sleep(2)
+        # Una lectura de Sheets cada dos segundos agota rápidamente la cuota y
+        # alterna falsos SHEETS_API_ERROR/429. La cola inmediata cubre eventos
+        # nuevos; esta verificación sólo es salud de respaldo.
+        time.sleep(60)
 
 def detener_verificacion_conexion():
     global verificar_conexion_activo
@@ -1856,6 +2755,10 @@ def procesar_timeout_inactividad():
     confirmacion_contingencia_abierta = False
     procesando_sesion = False
 
+    # El admin puede ser hijo de uno de estos modales. Límpialo antes de que
+    # Tk lo destruya indirectamente junto con su padre.
+    finalizar_dialogo_administrativo("TIMEOUT", restaurar=False)
+
     for dialogo in list(ventanas_flujo_alumno):
         try:
             if dialogo.winfo_exists():
@@ -1912,7 +2815,9 @@ def buscar_nombre(matricula):
         celdas = hoja_alumnos.col_values(1)
         if matricula in celdas:
             row = celdas.index(matricula) + 1
-            return hoja_alumnos.cell(row, 2).value
+            nombre = hoja_alumnos.cell(row, 2).value
+            actualizar_cache_persona(matricula, nombre=nombre)
+            return nombre
     except Exception as e:
         print(f"Error al buscar nombre: {e}")
         return None
@@ -1931,7 +2836,9 @@ def buscar_rol(matricula):
         if matricula in celdas:
             row = celdas.index(matricula) + 1
             rol = hoja_alumnos.cell(row, 3).value
-            return rol.strip().upper() if rol else "ALUMNO"
+            rol = rol.strip().upper() if rol else "ALUMNO"
+            actualizar_cache_persona(matricula, rol=rol)
+            return rol
     except Exception as e:
         print(f"Error al buscar rol: {e}")
         return "ALUMNO"
@@ -1950,6 +2857,11 @@ def consultar_datos_identidad(matricula):
         fila = matriculas.index(matricula) + 1
         rol = normalizar_rol(hoja_alumnos.cell(fila, 3).value)
         curp = hoja_alumnos.cell(fila, 4).value if rol_requiere_curp(rol) else None
+        # Sólo se persisten los dos caracteres usados en la validación, no la CURP.
+        curp_ultimos_2 = str(curp).strip()[-2:] if curp else None
+        actualizar_cache_persona(
+            matricula, rol=rol, curp_ultimos_2=curp_ultimos_2
+        )
         return rol, curp
     except ErrorConsultaGoogle:
         raise
@@ -1984,6 +2896,7 @@ def validar_curp_ultimos_2(curp_real, curp_ingresada):
 def pedir_curp_ultimos_2(parent):
     activar_timeout_inactividad()
     ventana_curp = tk.Toplevel(parent)
+    vincular_dispatcher_administrativo(ventana_curp)
     registrar_ventana_flujo_alumno(ventana_curp)
     ventana_curp.title("Validación de identidad")
     ventana_curp.resizable(False, False)
@@ -2136,6 +3049,15 @@ def _procesar_no_entrega_si_corresponde(matricula):
 
         registros = hoja_registros.get_all_values()
 
+        for fila in reversed(registros):
+            if len(fila) > COL_OBSERVACION and fila[COL_MATRICULA] == matricula and fila[COL_HORA_SALIDA].strip() == "" and observacion_es_normal(fila[COL_OBSERVACION]) and not matricula_exenta_no_entrega(matricula):
+                fecha, hora = _fecha_hora_local()
+                datos = {"matricula": matricula, "nombre": fila[COL_NOMBRE], "fecha": fila[COL_FECHA], "hora_ingreso": fila[COL_HORA_INGRESO], "hora_salida": hora, "laptop_id": fila[COL_LAPTOP_ID], "observacion": "NO_ENTREGA_CONTADA"}
+                clave = f"{matricula}:{fila[COL_LAPTOP_ID]}:{fila[COL_FECHA]}:{fila[COL_HORA_INGRESO]}"
+                crear_y_enviar_evento_critico("NO_ENTREGA", matricula, fila[COL_NOMBRE], fecha, hora, fila[COL_LAPTOP_ID], datos, clave)
+                return
+        return
+
         for i in reversed(range(len(registros))):
             fila = registros[i]
 
@@ -2183,13 +3105,7 @@ def _procesar_no_entrega_si_corresponde(matricula):
                         break
 
                     estado_intermedio = f"PROCESANDO_NO_ENTREGA:{objetivo}"
-                    try:
-                        hoja_registros.batch_update([
-                            {"range": f"E{numero_fila}", "values": [["-----"]]},
-                            {"range": f"G{numero_fila}", "values": [[estado_intermedio]]}
-                        ])
-                    except Exception as error_marcado:
-                        print(f"Respuesta ambigua al marcar no entrega: {error_marcado}")
+                    raise RuntimeError("NO_ENTREGA_DEBE_USAR_COORDINADOR")
                     verificacion = hoja_registros.get(f"E{numero_fila}:G{numero_fila}")
                     if (
                         not verificacion
@@ -2250,7 +3166,9 @@ def _existe_sesion_activa_para_matricula(registros, matricula):
 
 def registrar_entrada(matricula):
     try:
+        registrar_evento_tecnico(f"PRESTAMO_LOCAL_INICIANDO matricula={matricula}")
         if hoja_registros is None:
+            registrar_evento_tecnico("PRESTAMO_LOCAL_ERROR tipo=RuntimeError mensaje=HOJA_REGISTROS_NO_DISPONIBLE")
             return None
 
         nombre = buscar_nombre(matricula)
@@ -2258,40 +3176,59 @@ def registrar_entrada(matricula):
             hora, fecha = obtener_hora_internet()
             laptop_id = socket.gethostname()
 
-            fila_nueva = [
-                matricula,  # A Matrícula
-                nombre,     # B Nombre
-                fecha,      # C Fecha
-                hora,       # D Hora_Ingreso
-                "",         # E Hora_Salida
-                laptop_id,  # F Laptop_ID
-                "S/N"       # G Observación
-            ]
-
             with bloqueo_local_registro_prestamo():
                 registros = hoja_registros.get_all_values()
                 if _existe_sesion_activa_para_matricula(registros, matricula):
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE origen=REGISTROS"
+                    )
                     return None
-
-                try:
-                    hoja_registros.append_row(fila_nueva)
-                except Exception as error_append:
-                    print(f"Respuesta ambigua al registrar entrada: {error_append}")
-                    try:
-                        registros = hoja_registros.get_all_values()
-                        if _existe_entrada_del_mismo_intento(
-                            registros, matricula, nombre, fecha, hora, laptop_id
-                        ):
-                            return nombre
-                    except Exception as error_verificacion:
-                        print(f"No se pudo verificar la entrada ambigua: {error_verificacion}")
-                    raise
-
-            time.sleep(1)  # JUSTO AQUÍ (MUY IMPORTANTE)
+                previa = almacen_contingencia.obtener_sesion_activa(laptop_id)
+                if previa:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE "
+                        f"sesion={previa.get('id_sesion', '')} "
+                        f"prestamo_sincronizado={previa.get('prestamo_sincronizado', False)}"
+                    )
+                sesion = almacen_contingencia.registrar_prestamo_coordinador(
+                    matricula, nombre, laptop_id, fecha, hora, socket.gethostname()
+                )
+                id_evento = sesion.get("prestamo_evento_id")
+                if sesion.get("sesion_existente"):
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE "
+                        f"sesion={sesion.get('id_sesion', '')} "
+                        f"reconciliada={sesion.get('sesion_reconciliada', False)}"
+                    )
+                else:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_CREADA "
+                        f"sesion={sesion.get('id_sesion', '')} "
+                        f"reconciliada_previa={sesion.get('sesion_reconciliada', False)}"
+                    )
+                if id_evento:
+                    if not sesion.get("sesion_existente"):
+                        registrar_evento_tecnico(
+                            f"PRESTAMO_LOCAL_EVENTO_CREADO id={id_evento} tipo=PRESTAMO"
+                        )
+                    registrar_evento_tecnico("PRESTAMO_SYNC_INMEDIATA_SOLICITADA")
+                    # La solicitud despierta al sincronizador existente sin
+                    # esperar su POST; el UUID durable queda pendiente si falla.
+                    enviar_evento_local_inmediato(id_evento)
+                else:
+                    registrar_evento_tecnico(
+                        "PRESTAMO_LOCAL_SESION_EXISTENTE evento=NO_APLICA"
+                    )
 
             return nombre
+        registrar_evento_tecnico(
+            "PRESTAMO_LOCAL_ERROR tipo=LookupError mensaje=NOMBRE_NO_DISPONIBLE"
+        )
 
     except Exception as e:
+        registrar_evento_tecnico(
+            f"PRESTAMO_LOCAL_ERROR tipo={type(e).__name__} mensaje={str(e)[:300]}"
+        )
         print(f"Error al registrar entrada: {e}")
 
     return None
@@ -2316,384 +3253,435 @@ def _existe_entrada_del_mismo_intento(
 
 
 def registrar_salida_con_reintentos(
-    nombre, matricula, max_reintentos=3, callback_intento=None
+    nombre, matricula, max_reintentos=3, callback_intento=None,
+    solicitar_sincronizacion=True,
 ):
-    laptop_actual = socket.gethostname()
-    salida_iniciada = False
-    pausas = (0, 1, 2)
+    # No se confirmó Hora_Salida: el evento durable queda pendiente y no se apaga.
+    del nombre, max_reintentos
+    if callback_intento:
+        callback_intento(1, 1)
+    try:
+        fecha, hora = _fecha_hora_local()
+        sesion_previa = obtener_sesion_local_activa(matricula)
+        if not sesion_previa:
+            registrar_evento_tecnico(
+                "SESION_LOCAL_CIERRE_IGNORADO id_sesion=NO_ENCONTRADA "
+                "motivo=DEVOLUCION_SIN_SESION_ACTIVA"
+            )
+            return False
+        registrar_evento_tecnico(
+            "SESION_LOCAL_CIERRE_SOLICITADO "
+            f"id_sesion={sesion_previa['id_sesion']} tipo_evento=DEVOLUCION"
+        )
+        sesion = almacen_contingencia.registrar_devolucion_offline(
+            matricula, socket.gethostname(), fecha, hora,
+            id_sesion=sesion_previa["id_sesion"],
+        )
+        registrar_evento_tecnico(
+            f"SESION_LOCAL_CERRADA id_sesion={sesion['id_sesion']}"
+        )
+        id_evento = sesion.get("devolucion_evento_id")
+        # La UI de entrega puede reservar este único evento para el intento
+        # breve pre-apagado; los demás llamadores conservan el daemon normal.
+        if id_evento and solicitar_sincronizacion:
+            enviar_evento_local_inmediato(id_evento)
+        return sesion
+    except Exception as error:
+        registrar_evento_tecnico(f"COORDINADOR_DEVOLUCION_ERROR={type(error).__name__}")
+        return False
 
-    for numero_intento in range(1, max_reintentos + 1):
-        if numero_intento > 1:
-            time.sleep(pausas[min(numero_intento - 1, len(pausas) - 1)])
-        if callback_intento:
-            callback_intento(numero_intento, max_reintentos)
 
+def crear_control_devolucion(ventana, matricula, nombre, referencia_boton):
+    """Construye la única entrada de la devolución para una ventana de entrega.
+
+    ``estado`` es la única autoridad de etapa. Las referencias al modal y a los
+    temporizadores no representan etapas ni se usan como guards de negocio.
+    """
+    estado = {
+        "estado": "IDLE", "timers": {}, "modal": None,
+        "modal_elementos": None,
+    }
+    ventana._estado_devolucion = estado
+
+    def obtener_boton():
+        return referencia_boton.get("widget")
+
+    def cambiar_estado(nuevo):
+        anterior = estado["estado"]
+        if anterior == nuevo:
+            return
+        estado["estado"] = nuevo
+        registrar_evento_tecnico(f"DEVOLUCION_ESTADO {anterior}→{nuevo}")
+
+    def cancelar_timer(nombre_timer):
+        after_id = estado["timers"].pop(nombre_timer, None)
+        if after_id:
+            try:
+                ventana.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def cancelar_timers():
+        for nombre_timer in tuple(estado["timers"]):
+            cancelar_timer(nombre_timer)
+
+    def cerrar_modal():
+        modal = estado.get("modal")
+        estado["modal"] = None
+        estado["modal_elementos"] = None
+        if modal:
+            cerrar_modal_verificacion_ubicacion(modal)
+
+    def actualizar_modal(titulo, mensaje, texto_estado):
+        modal = estado.get("modal")
+        if not _widget_tk_vivo(modal):
+            modal_progreso = crear_modal_verificacion_ubicacion(
+                ventana, mensaje, titulo=titulo, estado=texto_estado
+            )
+            estado["modal"] = modal_progreso[0]
+            estado["modal_elementos"] = modal_progreso[1:]
+            return
+        elementos = estado.get("modal_elementos")
+        if elementos:
+            actualizar_modal_progreso(
+                modal, *elementos, titulo, mensaje, texto_estado
+            )
+            return
+        # El modal existente no necesita recrearse para cambiar de etapa.
         try:
-            if hoja_registros is None or not verificar_conexion_base_datos():
-                raise ErrorConsultaGoogle("Google Sheets no responde")
+            for widget in modal.winfo_children():
+                if isinstance(widget, tk.Label):
+                    texto = widget.cget("text")
+                    if texto in ("Verificando ubicación...", "Procesando...", "Guardando devolución...", "Registrando entrega..."):
+                        widget.config(text=texto_estado)
+        except tk.TclError:
+            pass
 
-            registros = hoja_registros.get_all_values()
-            if not registros:
-                raise ErrorConsultaGoogle("La hoja Registros está vacía")
-
-            hora, _ = obtener_hora_internet()
-            for i in reversed(range(len(registros))):
-                fila = registros[i]
-                if len(fila) <= COL_OBSERVACION or fila[COL_MATRICULA] != matricula:
-                    continue
-
-                hora_salida = fila[COL_HORA_SALIDA].strip()
-                laptop_registro = fila[COL_LAPTOP_ID]
-                observacion = fila[COL_OBSERVACION].strip()
-                if not observacion_es_normal(observacion):
-                    continue
-
-                if laptop_registro == laptop_actual and hora_salida == "":
-                    numero_fila = i + 1
-                    salida_iniciada = True
-                    try:
-                        hoja_registros.update_cell(
-                            numero_fila, COL_HORA_SALIDA + 1, hora
-                        )
-                    except Exception as error_update:
-                        print(f"Respuesta ambigua al registrar salida: {error_update}")
-
-                    salida_guardada = hoja_registros.cell(
-                        numero_fila, COL_HORA_SALIDA + 1
-                    ).value
-                    if (salida_guardada or "").strip() != "":
-                        registrar_evento_tecnico(
-                            f"SHEETS_SALIDA intento={numero_intento} resultado=OK"
-                        )
-                        return True
-                    raise ErrorConsultaGoogle("No se confirmó Hora_Salida")
-
-                if hora_salida == "" and laptop_registro != laptop_actual:
-                    registrar_evento_tecnico(
-                        f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
-                    )
-                    return False
-
-                if laptop_registro == laptop_actual and salida_iniciada:
-                    registrar_evento_tecnico(
-                        f"SHEETS_SALIDA intento={numero_intento} resultado=OK"
-                    )
-                    return True
+    def ejecutar_en_ui_devolucion(callback, *args):
+        """Devuelve cada resultado worker a Tk y recupera sus excepciones."""
+        def protegido():
+            try:
+                callback(*args)
+            except Exception as error:
                 registrar_evento_tecnico(
-                    f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
+                    f"DEVOLUCION_CALLBACK_ERROR tipo={type(error).__name__}"
+                )
+                abortar_devolucion("ERROR_CALLBACK_ANTES_DE_SQLITE")
+
+        if threading.current_thread() is threading.main_thread():
+            protegido()
+            return
+        try:
+            ventana.after(0, protegido)
+        except (AttributeError, tk.TclError):
+            registrar_evento_tecnico("DEVOLUCION_CALLBACK_ERROR tipo=TK_NO_DISPONIBLE")
+
+    def abortar_devolucion(motivo):
+        """Única salida recuperable: deja el botón listo para otro intento."""
+        if estado["estado"] in ("IDLE", "FINALIZADA", "SINCRONIZANDO"):
+            return
+        registrar_evento_tecnico(f"DEVOLUCION_ABORTADA motivo={motivo}")
+        cancelar_timers()
+        cerrar_modal()
+        cambiar_estado("ERROR_RECUPERABLE")
+        try:
+            boton = obtener_boton()
+            boton.config(state="normal", text="ENTREGAR Y APAGAR")
+        except (AttributeError, tk.TclError):
+            pass
+        # El command se configura una única vez al crear el botón y nunca se
+        # reemplaza durante el intento.
+        cambiar_estado("IDLE")
+        if motivo in ("ERROR_PERSISTENCIA", "TIMEOUT_PERSISTENCIA"):
+            mostrar_error(
+                "Devolución no registrada",
+                "No fue posible registrar la devolución.\n\nInténtelo nuevamente.",
+                parent=ventana,
+            )
+
+    def finalizar_devolucion(resultado_sincronizacion):
+        if estado["estado"] != "SINCRONIZANDO":
+            return
+        cancelar_timers()
+        cambiar_estado("FINALIZADA")
+        registrar_evento_tecnico("DEVOLUCION_FINALIZADA")
+        if resultado_sincronizacion == "CONFIRMADA":
+            actualizar_modal(
+                "Entrega registrada correctamente.",
+                "La laptop se apagará automáticamente.",
+                "",
+            )
+        elif resultado_sincronizacion == "OFFLINE":
+            registrar_evento_tecnico("DEVOLUCION_OFFLINE_GUARDADA_LOCAL")
+            registrar_evento_tecnico("SINCRONIZACION_PENDIENTE tipo=DEVOLUCION")
+            actualizar_modal(
+                "Entrega guardada localmente.",
+                "Se sincronizará automáticamente al recuperar la conexión.",
+                "La laptop se apagará automáticamente.",
+            )
+        else:
+            registrar_evento_tecnico("SINCRONIZACION_PENDIENTE tipo=DEVOLUCION")
+            actualizar_modal(
+                "Entrega guardada localmente.",
+                "La sincronización en línea quedó pendiente.",
+                "La laptop se apagará automáticamente.",
+            )
+
+        def apagar_despues_del_aviso():
+            cerrar_modal()
+            registrar_evento_tecnico("DEVOLUCION_APAGADO_CONFIRMADO")
+            try:
+                ventana.destroy()
+            except tk.TclError:
+                pass
+            apagar_windows()
+
+        estado["timers"]["apagado_automatico"] = ventana.after(
+            1250, apagar_despues_del_aviso
+        )
+
+    def watchdog_pre_durable():
+        if estado["estado"] == "PERSISTIENDO_LOCAL":
+            abortar_devolucion("TIMEOUT_PERSISTENCIA")
+
+    def iniciar_sincronizacion(id_evento, prestamo_evento_id=None):
+        if estado["estado"] != "PERSISTIENDO_LOCAL":
+            return
+        cancelar_timer("pre_durable")
+        cambiar_estado("SINCRONIZANDO")
+        registrar_evento_tecnico("DEVOLUCION_SYNC_INMEDIATA_SOLICITADA")
+        actualizar_modal(
+            "Preparando entrega...", "Comprobando conexión...", ""
+        )
+
+        def actualizar_intento(intento):
+            actualizar_modal(
+                "Guardando entrega en línea...",
+                "Guardando entrega en línea...",
+                f"Intento {intento} de {MAX_INTENTOS_SINCRONIZACION_DEVOLUCION}",
+            )
+
+        def sincronizar_intento():
+            if not sincronizacion_lock.acquire(
+                timeout=ESPERA_LOCK_SINCRONIZACION_INMEDIATA
+            ):
+                return False
+            try:
+                configuracion = cargar_configuracion_local(DIRECTORIO_APP)
+                sincronizador = SincronizadorContingencia(
+                    almacen_contingencia, configuracion, registrar_evento_tecnico
+                )
+                # La devolución depende del préstamo durable de la misma sesión.
+                if prestamo_evento_id and not sincronizador.sincronizar_evento(
+                    prestamo_evento_id,
+                    timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO,
+                ):
+                    return False
+                return sincronizador.sincronizar_evento(
+                    id_evento,
+                    timeout=TIMEOUT_SINCRONIZACION_PRE_APAGADO,
+                )
+            except Exception as error:
+                registrar_evento_tecnico(
+                    f"DEVOLUCION_SYNC_ERROR tipo={type(error).__name__}"
                 )
                 return False
+            finally:
+                sincronizacion_lock.release()
 
-            raise ErrorConsultaGoogle("No se encontró una sesión activa")
-        except Exception as error:
-            print(f"Error intento {numero_intento}: {error}")
-            registrar_evento_tecnico(
-                f"SHEETS_SALIDA intento={numero_intento} resultado=ERROR"
-            )
-
-    return False
-
-
-def mostrar_ventana_espera_registro(ventana_entrega, matricula, nombre,
-                                    modal_progreso):
-    """Registra la salida actualizando el modal abierto de devolución."""
-    ventana_espera, titulo_label, mensaje_label, estado_label = modal_progreso
-
-    def actualizar_progreso(estado):
-        estado_label.config(text=estado)
-
-    def intentar_registro():
-        def notificar_intento(intento, total):
-            ejecutar_en_ui(
-                actualizar_progreso,
-                "Guardando devolución..."
-            )
-
-        exito = registrar_salida_con_reintentos(
-            nombre, matricula, max_reintentos=3,
-            callback_intento=notificar_intento
-        )
-        if exito:
-            ejecutar_en_ui(
-                actualizar_progreso,
-                "Registro completado. Finalizando..."
-            )
-            time.sleep(1)
-        return exito
-
-    def finalizar_registro(exito):
-        cerrar_modal_verificacion_ubicacion(ventana_espera)
-        if exito:
-            ventana_entrega.destroy()
-            apagar_windows()
-        else:
-            mostrar_error(
-                "Error",
-                "No se pudo registrar la salida.\n\n"
-                "La laptop no se apagará.\n"
-                "Por favor intenta nuevamente."
-            )
-
-    # Ejecutar en un hilo separado
-    def ejecutar_registro():
-        exito = intentar_registro()
-        ejecutar_en_ui(finalizar_registro, exito)
-
-    threading.Thread(target=ejecutar_registro, daemon=True).start()
-
-    return ventana_espera
-
-def entregar_y_apagar(ventana, matricula, nombre, boton=None):
-    print("[DEVOLUCION] entrando a entregar_y_apagar")
-
-    if boton is None:
-        print("[DEVOLUCION] cancelada: botón no disponible")
-        return
-
-    if boton:
-        boton.config(
-            state="disabled",
-            text=(
-                "Verificando ubicación..."
-                if PROXIMIDAD_HABILITADA else "Verificando conexión..."
-            )
-        )
-        print("[DEVOLUCION] botón deshabilitado")
-        if PROXIMIDAD_HABILITADA:
-            modal_progreso = crear_modal_verificacion_ubicacion(
-                ventana,
-                "Asegúrate de estar cerca del carrito para continuar con la devolución."
-            )
-        else:
-            modal_progreso = crear_modal_verificacion_ubicacion(
-                ventana,
-                "Estamos verificando la información y guardando la entrega del equipo. "
-                "Por favor, espera.",
-                titulo="Registrando devolución",
-                estado="Procesando..."
-            )
-        print("[DEVOLUCION] modal creado")
-        ventana_ubicacion, titulo_ubicacion, mensaje_ubicacion, estado_ubicacion = modal_progreso
-        proximidad_visual_activa = {"valor": True}
-
-        def actualizar_intento_ubicacion(intento, total):
-            if proximidad_visual_activa["valor"]:
-                try:
-                    estado_ubicacion.config(text=f"Intento {intento} de {total}")
-                except tk.TclError:
-                    pass
-
-        def notificar_intento_ubicacion(intento, total):
-            ejecutar_en_ui(actualizar_intento_ubicacion, intento, total)
-
-        def comprobar_proximidad():
-            print("[DEVOLUCION] worker de proximidad ejecutándose")
-            try:
-                proximidad_valida, estado_proximidad = verificar_proximidad_carrito(
-                    callback_intento=notificar_intento_ubicacion,
-                    callback_evento=registrar_evento_tecnico
+        def worker_sincronizacion():
+            if not verificar_internet():
+                ejecutar_en_ui_devolucion(finalizar_devolucion, "OFFLINE")
+                return
+            for intento in range(1, MAX_INTENTOS_SINCRONIZACION_DEVOLUCION + 1):
+                registrar_evento_tecnico(
+                    "DEVOLUCION_SYNC_INTENTO "
+                    f"intento={intento} max={MAX_INTENTOS_SINCRONIZACION_DEVOLUCION}"
                 )
-            except Exception:
-                print("[DEVOLUCION] excepción en proximidad")
-                traceback.print_exc()
-                proximidad_valida = False
-                estado_proximidad = ESTADO_ERROR
-
-            ejecutar_en_ui(
-                procesar_resultado_proximidad,
-                proximidad_valida,
-                estado_proximidad
-            )
-
-        def procesar_resultado_proximidad(proximidad_valida, estado_proximidad):
-            nonlocal modal_progreso, ventana_ubicacion
-            nonlocal titulo_ubicacion, mensaje_ubicacion, estado_ubicacion
-            proximidad_visual_activa["valor"] = False
-
-            if not proximidad_valida:
-                permite_contingencia = estado_proximidad in (
-                    ESTADO_NO_DETECTADO,
-                    ESTADO_ERROR
-                )
-                if permite_contingencia:
-                    iniciar_contexto_contingencia(
-                        estado_proximidad,
-                        "DEVOLUCION",
-                        matricula,
-                        ventana
-                    )
-                else:
-                    cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-
-                mostrar_fallo_proximidad(
-                    estado_proximidad,
-                    parent=ventana,
-                    al_crear=(
-                        registrar_dialogo_fallo_contingencia
-                        if permite_contingencia else None
-                    )
-                )
-
-                if permite_contingencia and finalizar_contexto_contingencia():
-                    cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                    modal_progreso = crear_modal_verificacion_ubicacion(
-                        ventana,
-                        "Estamos verificando la información y guardando la entrega del equipo. "
-                        "Por favor, espera.",
-                        titulo="Registrando devolución",
-                        estado="Procesando..."
-                    )
-                    (
-                        ventana_ubicacion,
-                        titulo_ubicacion,
-                        mensaje_ubicacion,
-                        estado_ubicacion
-                    ) = modal_progreso
-                    procesar_resultado_proximidad(True, None)
+                ejecutar_en_ui_devolucion(actualizar_intento, intento)
+                if sincronizar_intento():
+                    registrar_evento_tecnico("DEVOLUCION_SYNC_CONFIRMADA")
+                    ejecutar_en_ui_devolucion(finalizar_devolucion, "CONFIRMADA")
                     return
+                if intento < MAX_INTENTOS_SINCRONIZACION_DEVOLUCION:
+                    time.sleep(ESPERA_ENTRE_INTENTOS_DEVOLUCION)
+            registrar_evento_tecnico(
+                "DEVOLUCION_SYNC_AGOTADA "
+                f"intentos={MAX_INTENTOS_SINCRONIZACION_DEVOLUCION} pendiente=True"
+            )
+            ejecutar_en_ui_devolucion(finalizar_devolucion, "PENDIENTE")
 
-                if permite_contingencia:
-                    cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
-                return
+        threading.Thread(target=worker_sincronizacion, daemon=True).start()
 
-            if boton:
-                boton.config(text="Verificando conexión...")
-            actualizar_modal_progreso(
-                ventana_ubicacion,
-                titulo_ubicacion,
-                mensaje_ubicacion,
-                estado_ubicacion,
+    def procesar_persistencia(sesion):
+        if estado["estado"] != "PERSISTIENDO_LOCAL":
+            return
+        if not sesion:
+            abortar_devolucion("ERROR_PERSISTENCIA")
+            return
+        id_evento = sesion.get("devolucion_evento_id")
+        if not id_evento:
+            abortar_devolucion("ERROR_PERSISTENCIA")
+            return
+        # finalizar_devolucion_durable sólo retorna tras cerrar el id_sesion
+        # exacto y dejar el UUID de DEVOLUCION en SQLite.
+        iniciar_sincronizacion(id_evento, sesion.get("prestamo_evento_id"))
+
+    def persistir_devolucion():
+        try:
+            sesion = finalizar_devolucion_durable(
+                matricula, solicitar_sincronizacion=False
+            )
+            ejecutar_en_ui_devolucion(procesar_persistencia, sesion)
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_PERSISTENCIA_ERROR tipo={type(error).__name__}"
+            )
+            ejecutar_en_ui_devolucion(abortar_devolucion, "ERROR_PERSISTENCIA")
+
+    def iniciar_persistencia(autorizacion_administrativa=False, estado_proximidad=None):
+        if estado["estado"] != "VALIDANDO_PROXIMIDAD":
+            return
+        if autorizacion_administrativa:
+            registrar_evento_tecnico(
+                "DEVOLUCION_PROXIMIDAD_AUTORIZADA_ADMIN "
+                f"estado={estado_proximidad or 'DESCONOCIDO'}"
+            )
+        cambiar_estado("PERSISTIENDO_LOCAL")
+        try:
+            boton = obtener_boton()
+            boton.config(text="Guardando devolución...")
+            actualizar_modal(
                 "Registrando devolución",
-                "Estamos verificando la información y guardando la entrega del equipo. "
-                "Por favor, espera.",
-                "Procesando..."
+                "Estamos guardando la entrega del equipo. Por favor, espera.",
+                "Guardando devolución...",
             )
-            threading.Thread(target=comprobar_devolucion, daemon=True).start()
+            registrar_evento_tecnico("DEVOLUCION_DURABLE_PIPELINE_INICIADO")
+            # Este watchdog mide exclusivamente SQLite; la interacción humana
+            # de proximidad y contraseña administrativa no tiene límite aquí.
+            estado["timers"]["pre_durable"] = ventana.after(5000, watchdog_pre_durable)
+            threading.Thread(target=persistir_devolucion, daemon=True).start()
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_TRANSICION_ERROR tipo={type(error).__name__}"
+            )
+            abortar_devolucion("ERROR_ANTES_DE_SQLITE")
 
-        def comprobar_devolucion():
-            def notificar_intento(intento, total):
-                ejecutar_en_ui(actualizar_intento_conexion, intento, total)
-
-            if not verificar_sheets_con_reintentos(
-                max_intentos=3, callback_intento=notificar_intento
-            ):
-                ejecutar_en_ui(procesar_resultado_devolucion, "error_conexion", None)
+    def procesar_resultado_proximidad(
+        proximidad_valida, estado_proximidad, autorizacion_administrativa=False
+    ):
+        if estado["estado"] != "VALIDANDO_PROXIMIDAD":
+            if autorizacion_administrativa:
+                registrar_evento_tecnico(
+                    "DEVOLUCION_BYPASS_IGNORADO "
+                    f"estado={estado['estado']}"
+                )
+            return
+        try:
+            if proximidad_valida:
+                iniciar_persistencia(autorizacion_administrativa, estado_proximidad)
                 return
 
-            try:
-                registros = hoja_registros.get_all_values()
-                ejecutar_en_ui(procesar_resultado_devolucion, "ok", registros)
-            except Exception:
-                ejecutar_en_ui(procesar_resultado_devolucion, "error_conexion", None)
-
-        def actualizar_intento_conexion(intento, total):
-            estado_ubicacion.config(
-                text="Verificando conexión..."
+            permite_contingencia = estado_proximidad in (ESTADO_NO_DETECTADO, ESTADO_ERROR)
+            contexto = iniciar_contexto_contingencia(
+                estado_proximidad,
+                "DEVOLUCION",
+                matricula,
+                ventana,
+                # El bypass entra explícitamente a esta misma continuación; no
+                # depende de que wait_window devuelva el control.
+                reanudar=lambda: procesar_resultado_proximidad(
+                    True, estado_proximidad, autorizacion_administrativa=True
+                ),
+                recuperar_bypass=abortar_devolucion,
             )
-
-        def procesar_resultado_devolucion(estado, registros):
-            if estado != "ok":
-                cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
-                if estado == "sin_internet":
-                    mostrar_error(
-                        "Sin acceso a Internet",
-                        "No hay conexión.\n\nLa laptop NO se apagará.",
-                        parent=ventana
-                    )
-                else:
-                    mostrar_error(
-                        "Error de conexión",
-                        "No fue posible verificar la conexión.\n\nIntenta nuevamente.",
-                        parent=ventana
-                    )
-                return
-
-            laptop_actual = socket.gethostname()
-            fila_encontrada = None
-            for fila in reversed(registros):
-                if (
-                    len(fila) > COL_OBSERVACION
-                    and fila[COL_MATRICULA] == matricula
-                    and fila[COL_LAPTOP_ID] == laptop_actual
-                    and fila[COL_HORA_SALIDA].strip() == ""
-                    and observacion_es_normal(fila[COL_OBSERVACION])
-                ):
-                    fila_encontrada = fila
-                    break
-
-            # Conserva los avisos existentes para una sesión ya cerrada, pero una
-            # no entrega contabilizada nunca representa la devolución actual.
-            if not fila_encontrada:
-                for fila in reversed(registros):
-                    if (
-                        len(fila) > COL_OBSERVACION
-                        and fila[COL_MATRICULA] == matricula
-                        and fila[COL_LAPTOP_ID] == laptop_actual
-                        and fila[COL_OBSERVACION].strip() != "NO_ENTREGA_CONTADA"
-                    ):
-                        fila_encontrada = fila
-                        break
-
-            if not fila_encontrada:
-                cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                if boton:
-                    boton.config(state="normal", text="ENTREGAR Y APAGAR")
-                mostrar_error(
-                    "Error",
-                    "No se encontró una sesión en esta laptop.",
-                    parent=ventana
+            mostrar_fallo_proximidad(
+                estado_proximidad,
+                parent=ventana,
+                al_crear=registrar_dialogo_fallo_contingencia,
+            )
+            autorizada = finalizar_contexto_contingencia()
+            if autorizada:
+                if contexto.get("reanudado"):
+                    return
+                procesar_resultado_proximidad(
+                    True, estado_proximidad, autorizacion_administrativa=True
                 )
                 return
-
-            hora_salida = fila_encontrada[COL_HORA_SALIDA].strip()
-            observacion = fila_encontrada[COL_OBSERVACION].strip()
-
-            if observacion == "CIERRE_AUTOMATICO_POR_NUEVA_SESION":
-                cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                mostrar_advertencia(
-                    "Sesión cerrada automáticamente",
-                    "Esta sesión ya fue cerrada automáticamente porque se inició en otro equipo.\n\n"
-                    "La laptop se apagará.",
-                    parent=ventana
-                )
-                ventana.destroy()
-                apagar_windows()
+            if not permite_contingencia:
+                abortar_devolucion("PROXIMIDAD_CANCELADA")
                 return
-
-            if hora_salida != "":
-                cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                mostrar_informacion(
-                    "Entrega ya registrada",
-                    "La salida ya fue registrada.\n\nLa laptop se apagará.",
-                    parent=ventana
-                )
-                ventana.destroy()
-                apagar_windows()
-                return
-
-            mostrar_ventana_espera_registro(
-                ventana, matricula, nombre, modal_progreso
+            abortar_devolucion("PROXIMIDAD_CANCELADA")
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_PROXIMIDAD_ERROR tipo={type(error).__name__}"
             )
+            abortar_devolucion("ERROR_ANTES_DE_SQLITE")
 
-    if PROXIMIDAD_HABILITADA:
-        print("[DEVOLUCION] iniciando proximidad")
-        threading.Thread(target=comprobar_proximidad, daemon=True).start()
-        print("[DEVOLUCION] worker iniciado")
-    else:
-        print("[DEVOLUCION] proximidad deshabilitada; verificando devolución")
-        threading.Thread(target=comprobar_devolucion, daemon=True).start()
-    return
+    def worker_proximidad():
+        try:
+            resultado = verificar_proximidad_carrito(callback_evento=registrar_evento_tecnico)
+            ejecutar_en_ui_devolucion(procesar_resultado_proximidad, *resultado)
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_PROXIMIDAD_WORKER_ERROR tipo={type(error).__name__}"
+            )
+            ejecutar_en_ui_devolucion(abortar_devolucion, "ERROR_ANTES_DE_SQLITE")
 
+    def iniciar_devolucion():
+        """Única entrada pública del botón ENTREGAR Y APAGAR."""
+        registrar_evento_tecnico(
+            f"DEVOLUCION_CLICK_RECIBIDO estado={estado['estado']}"
+        )
+        if estado["estado"] != "IDLE":
+            registrar_evento_tecnico(
+                "DEVOLUCION_CLICK_IGNORADO motivo=ESTADO_NO_IDLE "
+                f"estado={estado['estado']}"
+            )
+            return
+        cambiar_estado("VALIDANDO_PROXIMIDAD")
+        try:
+            boton = obtener_boton()
+            if not PROXIMIDAD_HABILITADA:
+                boton.config(state="disabled", text="Continuar...")
+                mostrar_dialogo_personalizado(
+                    "Aviso",
+                    "Antes de continuar, asegúrate de estar cerca del carrito móvil "
+                    "para entregar y apagar la laptop.",
+                    "info",
+                    parent=ventana,
+                    texto_boton="Aceptar",
+                )
+                registrar_evento_tecnico(
+                    "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=DEVOLUCION"
+                )
+                boton.config(state="disabled", text="Guardando devolución...")
+                iniciar_persistencia()
+                return
+            boton.config(
+                state="disabled",
+                text="Verificando ubicación...",
+            )
+            estado["modal"] = crear_modal_verificacion_ubicacion(
+                ventana,
+                "Asegúrate de estar cerca del carrito para continuar con la devolución.",
+            )[0]
+            threading.Thread(target=worker_proximidad, daemon=True).start()
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"DEVOLUCION_INICIO_ERROR tipo={type(error).__name__}"
+            )
+            abortar_devolucion("ERROR_ANTES_DE_SQLITE")
+
+    ventana._abortar_devolucion = abortar_devolucion
+    return iniciar_devolucion
 
 
 def mostrar_ventana_entrega(nombre, matricula):
     global ventana_entrega_activa
 
     ventana_entrega = tk.Toplevel()
+    vincular_dispatcher_administrativo(ventana_entrega)
     ventana_entrega_activa = ventana_entrega
 
     def limpiar_referencia_entrega(event):
@@ -2755,37 +3743,23 @@ def mostrar_ventana_entrega(nombre, matricula):
         wraplength=340
     ).pack(pady=(0, 25))
 
-
-    # Botón principal
-    def iniciar_devolucion_desde_boton():
-        print("[DEVOLUCION] clic ENTREGAR Y APAGAR")
-        try:
-            entregar_y_apagar(
-                ventana_entrega,
-                matricula,
-                nombre,
-                boton=btn_entregar
-            )
-        except Exception:
-            print("[DEVOLUCION] excepción al iniciar la devolución")
-            traceback.print_exc()
-            try:
-                if btn_entregar.winfo_exists():
-                    btn_entregar.config(
-                        state="normal",
-                        text="ENTREGAR Y APAGAR"
-                    )
-            except tk.TclError:
-                pass
-
+    # El command existe desde que Tk crea el botón; nunca se reasigna durante
+    # un intento. La referencia diferida evita crear el botón sin callback.
+    referencia_boton = {"widget": None}
+    iniciar_devolucion = crear_control_devolucion(
+        ventana_entrega, matricula, nombre, referencia_boton
+    )
     btn_entregar = tk.Button(
         frame_principal,
         text="ENTREGAR Y APAGAR",
         padx=30,
         pady=15,
-        command=iniciar_devolucion_desde_boton,
+        state="normal",
+        command=iniciar_devolucion,
         **estilo_boton("error")
     )
+    referencia_boton["widget"] = btn_entregar
+    registrar_evento_tecnico("DEVOLUCION_UI_LISTA estado=IDLE boton=normal")
     btn_entregar.pack(pady=20)
 
     tk.Label(
@@ -2865,7 +3839,8 @@ def verificar_sesion_activa_en_otra_laptop(matricula):
     return False, None
 
 
-def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
+def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False,
+                                modo_contingencia=False, persona_cache=None):
     global entrada, ventana, procesando_sesion
 
     if not identidad_confirmada:
@@ -2891,6 +3866,51 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             ejecutar_en_ui(procesar_sesion, "ok", *resultado)
         except ErrorConsultaGoogle:
             ejecutar_en_ui(procesar_sesion, "error", False, None)
+
+    def resolver_sesion_local():
+        previa = obtener_sesion_local_activa()
+        if not previa:
+            ejecutar_en_ui(procesar_sesion_local, "sin_sesion", None)
+            return
+        registrar_evento_tecnico(
+            f"SESION_RESIDUAL_DETECTADA id_sesion={previa['id_sesion']}"
+        )
+        try:
+            fecha, hora = _fecha_hora_local()
+            resultado = almacen_contingencia.cerrar_sesion_residual_al_arrancar(
+                socket.gethostname(), fecha, hora, socket.gethostname()
+            )
+            cerrada = resultado.get("sesion")
+            if resultado.get("resultado") == "SESION_RESIDUAL_CERRADA" and cerrada:
+                if resultado.get("no_entrega_creada"):
+                    registrar_evento_tecnico(
+                        f"NO_ENTREGA_RESIDUAL_CREADA id_sesion={cerrada['id_sesion']}"
+                    )
+                for campo in ("no_entrega_evento_id", "cierre_automatico_evento_id"):
+                    if cerrada.get(campo):
+                        enviar_evento_local_inmediato(cerrada[campo])
+                registrar_evento_tecnico(
+                    f"SESION_RESIDUAL_CERRADA id_sesion={cerrada['id_sesion']}"
+                )
+                ejecutar_en_ui(procesar_sesion_local, "residual_cerrada", cerrada)
+                return
+        except Exception as error:
+            registrar_evento_tecnico(
+                f"SESION_RESIDUAL_CIERRE_ERROR tipo={type(error).__name__}"
+            )
+        ejecutar_en_ui(procesar_sesion_local, "error", previa)
+
+    def procesar_sesion_local(resultado, sesion):
+        global procesando_sesion
+        if resultado == "error":
+            mostrar_error(
+                "Error",
+                "No se pudo resolver la sesión anterior.\n\nIntenta nuevamente."
+            )
+            reiniciar_estado_sistema()
+            return
+        registrar_evento_tecnico("FLUJO_SELECCIONADO tipo=PRESTAMO_NUEVO")
+        iniciar_validacion_identidad()
 
     def procesar_sesion(resultado_consulta, sesion_activa, laptop_otro):
         if resultado_consulta == "error":
@@ -2924,7 +3944,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             threading.Thread(target=cerrar_sesion_anterior, daemon=True).start()
             return
 
-        iniciar_validacion_identidad()
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
 
     def cerrar_sesion_anterior():
         try:
@@ -2941,7 +3961,7 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             )
             reiniciar_estado_sistema()
             return
-        iniciar_validacion_identidad()
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
 
     def iniciar_validacion_identidad():
         cambiar_estado("Validando identidad...", COLOR_ADVERTENCIA)
@@ -2949,7 +3969,14 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
 
     def consultar_identidad():
         try:
-            rol, curp_real = consultar_datos_identidad(matricula)
+            if modo_contingencia:
+                rol = normalizar_rol(persona_cache.get("rol"))
+                curp_real = (
+                    persona_cache.get("curp_ultimos_2")
+                    if rol_requiere_curp(rol) else None
+                )
+            else:
+                rol, curp_real = consultar_datos_identidad(matricula)
             if rol is None:
                 registrar_evento_tecnico(
                     f"IDENTIDAD matricula={matricula} resultado=NO_ENCONTRADA"
@@ -3005,6 +4032,15 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             registrar_evento_tecnico(
                 f"IDENTIDAD matricula={matricula} rol={rol} CURP_ALUMNO_VACIA"
             )
+            if modo_contingencia:
+                mostrar_error(
+                    "Validación offline no disponible",
+                    "Esta matrícula está en la caché local, pero todavía no tiene "
+                    "el verificador de identidad guardado.\n\n"
+                    "Conéctate a Internet una vez para actualizarla."
+                )
+                cancelar_validacion_curp()
+                return
             mostrar_error(
                 "Error",
                 "No se pudo validar la identidad.\nContacta al administrador."
@@ -3013,6 +4049,9 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
             return
 
         for intento in range(1, 4):
+            registrar_evento_tecnico(
+                f"CURP_SOLICITADA matricula={matricula} intento={intento}"
+            )
             curp_ingresada = pedir_curp_ultimos_2(ventana)
             if not curp_ingresada:
                 cancelar_validacion_curp()
@@ -3059,9 +4098,18 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
 
     def consultar_control():
         try:
-            procesar_no_entrega_si_corresponde(matricula)
-            no_entregas, estado = obtener_control_alumno(matricula)
-            tiene_pendiente, fecha_entrada, laptop_id = verificar_entrega_pendiente(matricula)
+            if modo_contingencia:
+                no_entregas = no_entregas_efectivas_local(
+                    matricula, persona_cache.get("no_entregas")
+                )
+                estado = persona_cache.get("estado")
+                tiene_pendiente = False
+                fecha_entrada = None
+                laptop_id = None
+            else:
+                procesar_no_entrega_si_corresponde(matricula)
+                no_entregas, estado = obtener_control_alumno(matricula)
+                tiene_pendiente, fecha_entrada, laptop_id = verificar_entrega_pendiente(matricula)
             ejecutar_en_ui(
                 procesar_control,
                 no_entregas,
@@ -3135,7 +4183,10 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         threading.Thread(target=registrar_prestamo, daemon=True).start()
 
     def registrar_prestamo():
-        resultado = registrar_entrada(matricula)
+        if modo_contingencia:
+            resultado = nombre if registrar_prestamo_contingencia(matricula, nombre) else None
+        else:
+            resultado = registrar_entrada(matricula)
         ejecutar_en_ui(finalizar_prestamo, resultado)
 
     def finalizar_prestamo(resultado):
@@ -3149,7 +4200,10 @@ def mostrar_confirmacion_simple(nombre, matricula, identidad_confirmada=False):
         ventana.withdraw()
         ventana.after(200, lambda: mostrar_ventana_entrega(nombre, matricula))
 
-    threading.Thread(target=consultar_sesion, daemon=True).start()
+    if modo_contingencia:
+        threading.Thread(target=resolver_sesion_local, daemon=True).start()
+    else:
+        threading.Thread(target=consultar_sesion, daemon=True).start()
     return True
 
 
@@ -3193,6 +4247,7 @@ def mostrar_aviso_internet_bloqueante():
     except:
         aviso_internet = None
     aviso_internet = tk.Toplevel(ventana)
+    vincular_dispatcher_administrativo(aviso_internet)
     aviso_internet.title("Conexión Requerida")
     
     # Hacer la ventana completamente bloqueante
@@ -3211,6 +4266,7 @@ def mostrar_aviso_internet_bloqueante():
     
     aviso_internet.geometry(f"{ancho_aviso}x{alto_aviso}+{x}+{y}")
     aviso_internet.configure(bg=COLOR_PRIMARIO)
+    aviso_internet.focus_force()
     
     # Frame principal
     frame_aviso = tk.Frame(aviso_internet, bg=COLOR_TARJETA, bd=0, relief=tk.FLAT)
@@ -3355,7 +4411,6 @@ def iniciar_sesion():
     if procesando_sesion:
         return
 
-
     flujo_cancelado_por_inactividad = False
     procesando_sesion = True
     btn_entrar.config(state="disabled")
@@ -3383,6 +4438,7 @@ def iniciar_sesion():
     estado_ubicacion = None
     proximidad_visual_activa = {"valor": False}
     alumno_confirmado = {"nombre": None}
+    acceso_contingencia = {"activo": False, "persona": None}
 
 
     def consultar_acceso():
@@ -3396,7 +4452,11 @@ def iniciar_sesion():
         if not verificar_sheets_con_reintentos(
             max_intentos=3, callback_intento=notificar_intento
         ):
-            ejecutar_en_ui(procesar_acceso_seguro, "error_conexion", None)
+            persona = obtener_persona_cache(matricula)
+            if persona:
+                ejecutar_en_ui(procesar_acceso_seguro, "contingencia", persona)
+            else:
+                ejecutar_en_ui(procesar_acceso_seguro, "sin_cache", None)
             return
 
         nombre = buscar_nombre(matricula)
@@ -3412,21 +4472,24 @@ def iniciar_sesion():
     def procesar_acceso(estado, nombre):
         nonlocal ventana_ubicacion, titulo_ubicacion
         nonlocal mensaje_ubicacion, estado_ubicacion
-        if estado == "sin_internet":
+        if estado == "sin_cache":
             mostrar_error(
-                "Sin acceso a Internet",
-                "No hay conexión disponible.\n\nConecte la computadora e intente nuevamente."
+                "Validación no disponible",
+                "No es posible validar esta matrícula en este momento.\n\n"
+                "Intenta nuevamente más tarde."
             )
             reiniciar_estado_sistema()
             return
 
-        if estado == "error_conexion":
-            mostrar_error(
-                "Error de conexión",
-                "No fue posible verificar la conexión.\n\nIntenta nuevamente."
+        if estado == "contingencia":
+            acceso_contingencia["activo"] = True
+            acceso_contingencia["persona"] = nombre
+            nombre = nombre.get("nombre")
+            cambiar_estado("Modo de contingencia", COLOR_ADVERTENCIA)
+            mostrar_informacion(
+                "Modo de contingencia",
+                "El registro se guardará y sincronizará automáticamente."
             )
-            reiniciar_estado_sistema()
-            return
 
         if not nombre:
             mostrar_error(
@@ -3454,11 +4517,23 @@ def iniciar_sesion():
             return
 
         alumno_confirmado["nombre"] = nombre
+        mostrar_dialogo_personalizado(
+            "Aviso",
+            "Recuerda permanecer cerca del carrito móvil al tomar la laptop.",
+            "info",
+            parent=ventana,
+            texto_boton="Aceptar",
+        )
         if not PROXIMIDAD_HABILITADA:
+            registrar_evento_tecnico(
+                "PROXIMIDAD_OMITIDA motivo=DESHABILITADA operacion=PRESTAMO"
+            )
             mostrar_confirmacion_simple(
                 alumno_confirmado["nombre"],
                 matricula,
-                identidad_confirmada=True
+                identidad_confirmada=True,
+                modo_contingencia=acceso_contingencia["activo"],
+                persona_cache=acceso_contingencia["persona"]
             )
             return
 
@@ -3500,7 +4575,9 @@ def iniciar_sesion():
     def notificar_intento_ubicacion(intento, total):
         ejecutar_en_ui(actualizar_intento_ubicacion, intento, total)
 
-    def procesar_proximidad(proximidad_valida, estado_proximidad):
+    def procesar_proximidad(
+        proximidad_valida, estado_proximidad, autorizacion_administrativa=False
+    ):
         proximidad_visual_activa["valor"] = False
 
         if not proximidad_valida:
@@ -3508,14 +4585,16 @@ def iniciar_sesion():
                 ESTADO_NO_DETECTADO,
                 ESTADO_ERROR
             )
-            if permite_contingencia:
-                iniciar_contexto_contingencia(
-                    estado_proximidad,
-                    "PRESTAMO",
-                    matricula,
-                    ventana
+            contexto = iniciar_contexto_contingencia(
+                estado_proximidad,
+                "PRESTAMO_NUEVO",
+                matricula,
+                ventana,
+                reanudar=lambda: procesar_proximidad(
+                    True, estado_proximidad, autorizacion_administrativa=True
                 )
-            else:
+            )
+            if not permite_contingencia:
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
 
             try:
@@ -3523,19 +4602,19 @@ def iniciar_sesion():
                 mostrar_fallo_proximidad(
                     estado_proximidad,
                     parent=ventana,
-                    al_crear=(
-                        registrar_dialogo_fallo_contingencia
-                        if permite_contingencia else None
-                    )
+                    al_crear=registrar_dialogo_fallo_contingencia
                 )
             except Exception:
                 traceback.print_exc()
             finally:
                 cancelar_timeout_inactividad()
 
-            if permite_contingencia and finalizar_contexto_contingencia():
+            contingencia_autorizada = finalizar_contexto_contingencia()
+            if contingencia_autorizada:
+                if contexto.get("reanudado"):
+                    return
                 cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
-                procesar_proximidad(True, None)
+                procesar_proximidad(True, None, autorizacion_administrativa=True)
                 return
 
             if permite_contingencia:
@@ -3544,10 +4623,13 @@ def iniciar_sesion():
             return
 
         cerrar_modal_verificacion_ubicacion(ventana_ubicacion)
+        registrar_evento_tecnico("FLUJO_PRESTAMO_NUEVO")
         mostrar_confirmacion_simple(
             alumno_confirmado["nombre"],
             matricula,
-            identidad_confirmada=True
+            identidad_confirmada=True,
+            modo_contingencia=acceso_contingencia["activo"],
+            persona_cache=acceso_contingencia["persona"]
         )
 
     cambiar_estado("Verificando conexión...", COLOR_ADVERTENCIA)
@@ -3777,8 +4859,9 @@ def iniciar_conexion_en_segundo_plano():
             conectar_google_sheets(internet_verificado=True)
         else:
             def mostrar_sin_conexion():
-                cambiar_estado("Sin acceso a Internet", COLOR_ERROR)
-                mostrar_aviso_internet_bloqueante()
+                # La ausencia de Internet no bloquea por sí sola una matrícula
+                # que pueda validarse con la caché local de contingencia.
+                cambiar_estado("Sin conexión; contingencia disponible", COLOR_ADVERTENCIA)
 
             ejecutar_en_ui(mostrar_sin_conexion)
 
@@ -3786,6 +4869,23 @@ def iniciar_conexion_en_segundo_plano():
 
 def iniciar_verificacion_periodica():
     threading.Thread(target=verificar_conexion_periodicamente, daemon=True).start()
+
+
+def sincronizar_pendientes_periodicamente():
+    iniciar_sincronizacion_pendientes()
+    try:
+        ventana.after(45000, sincronizar_pendientes_periodicamente)
+    except tk.TclError:
+        pass
+
+
+def actualizar_configuracion_periodicamente():
+    """La versión central se revisa cada diez minutos, nunca por evento."""
+    threading.Thread(target=actualizar_configuracion_sincronizacion, daemon=True).start()
+    try:
+        ventana.after(600000, actualizar_configuracion_periodicamente)
+    except tk.TclError:
+        pass
 
 
 def notificar_interfaz_lista():
@@ -3813,9 +4913,10 @@ registrar_evento_tecnico(
     f"MODO_PRODUCCION={not MODO_PRUEBA} "
     f"PROXIMIDAD_HABILITADA={PROXIMIDAD_HABILITADA}"
 )
+inicializar_infraestructura_contingencia()
 ventana = tk.Tk()
-ventana.bind_all("<Control-Alt-u>", manejar_atajo_administrativo)
-ventana.bind_all("<KeyPress>", registrar_actividad_usuario, add="+")
+vincular_dispatcher_administrativo(ventana)
+ventana.bind_all("<KeyPress>", manejar_tecla_global)
 ventana.bind_all("<ButtonPress>", registrar_actividad_usuario, add="+")
 ventana.title(f"SISTEMA DE CONTROL DE LAPTOPS - UTP | v{VERSION_SISTEMA}")
 
@@ -3827,6 +4928,7 @@ ventana.configure(bg=COLOR_FONDO)
 
 # AQUÍ SE CREA EL LOGIN
 crear_pantalla_login()
+ventana.after_idle(registrar_sesion_pendiente_al_iniciar)
 
 # SEGURIDAD
 ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)
@@ -3840,6 +4942,8 @@ ventana.after(100, iniciar_limpieza_logs)
 ventana.after(300, iniciar_conexion_en_segundo_plano)
 ventana.after(1800, iniciar_actualizacion_en_segundo_plano)
 ventana.after(5000, iniciar_verificacion_periodica)
+ventana.after(15000, sincronizar_pendientes_periodicamente)
+ventana.after(30000, actualizar_configuracion_periodicamente)
 ventana.after(
     600,
     lambda: iniciar_heartbeat_manager(
