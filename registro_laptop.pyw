@@ -60,7 +60,7 @@ except ImportError:
     PIL_DISPONIBLE = False
 
 # --- VARIABLES GLOBALES ---
-VERSION_SISTEMA = "1.4.12"
+VERSION_SISTEMA = "1.4.13"
 MODO_PRUEBA = False
 # Interruptor temporal: conservar toda la implementación de Raspberry/RSSI para
 # reactivarla cambiando únicamente este valor a True.
